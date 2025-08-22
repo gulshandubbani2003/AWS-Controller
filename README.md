@@ -12,7 +12,8 @@ A comprehensive AWS management dashboard built with React frontend and Flask bac
 - **Cross-Region Support**: Connect to any AWS region
 
 ## Screenshots
-![Uploading Screenshot 2025-08-23 at 12.18.31 AM.png…]()
+<img width="2880" height="1500" alt="Screenshot 2025-08-23 at 12 18 31 AM" src="https://github.com/user-attachments/assets/aa383af3-d855-4b1d-8f93-ac5df9f5224a" />
+
 
 
 The dashboard provides:
