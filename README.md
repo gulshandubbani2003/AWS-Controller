@@ -1,4 +1,4 @@
-# AWS Management Dashboard
+# CloudSentinel (AWS Management Dashboard)
 
 A comprehensive AWS management dashboard built with React frontend and Flask backend. Monitor and manage your AWS resources including EC2, RDS, Lambda, S3, VPC, and IAM with a beautiful, modern interface.
 
