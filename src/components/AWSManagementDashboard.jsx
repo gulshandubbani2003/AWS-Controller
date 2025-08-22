@@ -50,7 +50,10 @@ const AWSManagementDashboard = () => {
     subnets: [],
     iam_users: [],
     iam_roles: [],
-    security_alerts: []
+    security_alerts: [],
+    cloudwatch_metrics: {},
+    cloudwatch_logs: {},
+    cloudwatch_alarms: {}
   });
   const [refreshing, setRefreshing] = useState(false);
 
@@ -257,6 +260,7 @@ const AWSManagementDashboard = () => {
               { id: 's3', name: 'S3 Buckets', icon: HardDrive },
               { id: 'vpc', name: 'VPC', icon: Network },
               { id: 'iam', name: 'IAM', icon: Users },
+              { id: 'cloudwatch', name: 'CloudWatch', icon: Activity },
               { id: 'security', name: 'Security', icon: Shield }
             ].map(tab => {
               const Icon = tab.icon;
@@ -341,6 +345,23 @@ const AWSManagementDashboard = () => {
                   </div>
                   <div className="h-12 w-12 bg-red-100 rounded-lg flex items-center justify-center">
                     <AlertTriangle className="h-6 w-6 text-red-600" />
+                  </div>
+                </div>
+              </div>
+              
+              <div className="bg-white rounded-xl shadow-sm p-6 border border-gray-200 hover:shadow-md transition-shadow">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-600">CloudWatch Metrics</p>
+                    <p className="text-3xl font-bold text-gray-900">
+                      {Object.keys(awsData.cloudwatch_metrics || {}).length}
+                    </p>
+                    <p className="text-sm text-blue-600 mt-1">
+                      {awsData.cloudwatch_metrics?.ec2_cpu?.length || 0} active
+                    </p>
+                  </div>
+                  <div className="h-12 w-12 bg-blue-100 rounded-lg flex items-center justify-center">
+                    <Activity className="h-6 w-6 text-blue-600" />
                   </div>
                 </div>
               </div>
@@ -721,6 +742,198 @@ const AWSManagementDashboard = () => {
                     </div>
                   ))}
                 </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'cloudwatch' && (
+          <div className="space-y-6">
+            {/* CloudWatch Metrics */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200">
+              <div className="px-6 py-4 border-b border-gray-200">
+                <h2 className="text-lg font-semibold text-gray-900 flex items-center">
+                  <Activity className="h-5 w-5 mr-2" />
+                  CloudWatch Metrics
+                </h2>
+              </div>
+              <div className="p-6">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  {/* EC2 CPU Metrics */}
+                  <div className="border border-gray-200 rounded-lg p-4">
+                    <h3 className="font-semibold text-gray-900 mb-3 flex items-center">
+                      <Server className="h-4 w-4 mr-2" />
+                      EC2 CPU Utilization
+                    </h3>
+                    {awsData.cloudwatch_metrics?.ec2_cpu?.length > 0 ? (
+                      <div className="space-y-2">
+                        {awsData.cloudwatch_metrics.ec2_cpu.slice(0, 3).map((metric, index) => (
+                          <div key={index} className="text-sm">
+                            <div className="flex justify-between">
+                              <span className="text-gray-600">Average:</span>
+                              <span className="font-medium">{metric.Average?.toFixed(2)}%</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-gray-600">Maximum:</span>
+                              <span className="font-medium">{metric.Maximum?.toFixed(2)}%</span>
+                            </div>
+                            <div className="text-xs text-gray-500 mt-1">
+                              {new Date(metric.Timestamp).toLocaleTimeString()}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-gray-500 text-sm">No EC2 CPU metrics available</p>
+                    )}
+                  </div>
+
+                  {/* RDS CPU Metrics */}
+                  <div className="border border-gray-200 rounded-lg p-4">
+                    <h3 className="font-semibold text-gray-900 mb-3 flex items-center">
+                      <Database className="h-4 w-4 mr-2" />
+                      RDS CPU Utilization
+                    </h3>
+                    {awsData.cloudwatch_metrics?.rds_cpu?.length > 0 ? (
+                      <div className="space-y-2">
+                        {awsData.cloudwatch_metrics.rds_cpu.slice(0, 3).map((metric, index) => (
+                          <div key={index} className="text-sm">
+                            <div className="flex justify-between">
+                              <span className="text-gray-600">Average:</span>
+                              <span className="font-medium">{metric.Average?.toFixed(2)}%</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-gray-600">Maximum:</span>
+                              <span className="font-medium">{metric.Maximum?.toFixed(2)}%</span>
+                            </div>
+                            <div className="text-xs text-gray-500 mt-1">
+                              {new Date(metric.Timestamp).toLocaleTimeString()}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-gray-500 text-sm">No RDS CPU metrics available</p>
+                    )}
+                  </div>
+
+                  {/* Lambda Duration Metrics */}
+                  <div className="border border-gray-200 rounded-lg p-4">
+                    <h3 className="font-semibold text-gray-900 mb-3 flex items-center">
+                      <Zap className="h-4 w-4 mr-2" />
+                      Lambda Duration
+                    </h3>
+                    {awsData.cloudwatch_metrics?.lambda_duration?.length > 0 ? (
+                      <div className="space-y-2">
+                        {awsData.cloudwatch_metrics.lambda_duration.slice(0, 3).map((metric, index) => (
+                          <div key={index} className="text-sm">
+                            <div className="flex justify-between">
+                              <span className="text-gray-600">Average:</span>
+                              <span className="font-medium">{(metric.Average / 1000).toFixed(2)}s</span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-gray-600">Maximum:</span>
+                              <span className="font-medium">{(metric.Maximum / 1000).toFixed(2)}s</span>
+                            </div>
+                            <div className="text-xs text-gray-500 mt-1">
+                              {new Date(metric.Timestamp).toLocaleTimeString()}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-gray-500 text-sm">No Lambda duration metrics available</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* CloudWatch Logs */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200">
+              <div className="px-6 py-4 border-b border-gray-200">
+                <h2 className="text-lg font-semibold text-gray-900 flex items-center">
+                  <Clock className="h-5 w-5 mr-2" />
+                  Recent CloudWatch Logs
+                </h2>
+              </div>
+              <div className="p-6">
+                {awsData.cloudwatch_logs?.recent_events?.length > 0 ? (
+                  <div className="space-y-3">
+                    {awsData.cloudwatch_logs.recent_events.slice(0, 5).map((event, index) => (
+                      <div key={index} className="border border-gray-200 rounded-lg p-3 bg-gray-50">
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1">
+                            <p className="text-sm font-medium text-gray-900">
+                              {event.logStreamName || 'Unknown Stream'}
+                            </p>
+                            <p className="text-xs text-gray-600 mt-1">
+                              {event.message?.substring(0, 100)}...
+                            </p>
+                          </div>
+                          <div className="text-xs text-gray-500 ml-3">
+                            {new Date(event.timestamp).toLocaleTimeString()}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-8">
+                    <Clock className="h-12 w-12 text-gray-400 mx-auto mb-3" />
+                    <p className="text-gray-500">No recent log events available</p>
+                    <p className="text-sm text-gray-400 mt-1">Logs will appear here when available</p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* CloudWatch Alarms */}
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200">
+              <div className="px-6 py-4 border-b border-gray-200">
+                <h2 className="text-lg font-semibold text-gray-900 flex items-center">
+                  <AlertTriangle className="h-5 w-5 mr-2" />
+                  CloudWatch Alarms ({awsData.cloudwatch_alarms?.alarms?.length || 0})
+                </h2>
+              </div>
+              <div className="p-6">
+                {awsData.cloudwatch_alarms?.alarms?.length > 0 ? (
+                  <div className="space-y-3">
+                    {awsData.cloudwatch_alarms.alarms.slice(0, 5).map((alarm, index) => (
+                      <div key={index} className={`border rounded-lg p-4 ${
+                        alarm.StateValue === 'ALARM' ? 'border-red-200 bg-red-50' :
+                        alarm.StateValue === 'OK' ? 'border-green-200 bg-green-50' :
+                        'border-yellow-200 bg-yellow-50'
+                      }`}>
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1">
+                            <h3 className="font-semibold text-gray-900">{alarm.AlarmName}</h3>
+                            <p className="text-sm text-gray-600 mt-1">{alarm.AlarmDescription || 'No description'}</p>
+                            <div className="mt-2 text-xs text-gray-500">
+                              <p>Metric: {alarm.MetricName}</p>
+                              <p>Namespace: {alarm.Namespace}</p>
+                            </div>
+                          </div>
+                          <div className="ml-4">
+                            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                              alarm.StateValue === 'ALARM' ? 'bg-red-100 text-red-800' :
+                              alarm.StateValue === 'OK' ? 'bg-green-100 text-green-800' :
+                              'bg-yellow-100 text-yellow-800'
+                            }`}>
+                              {alarm.StateValue}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-8">
+                    <AlertTriangle className="h-12 w-12 text-gray-400 mx-auto mb-3" />
+                    <p className="text-gray-500">No CloudWatch alarms configured</p>
+                    <p className="text-sm text-gray-400 mt-1">Alarms will appear here when configured</p>
+                  </div>
+                )}
               </div>
             </div>
           </div>

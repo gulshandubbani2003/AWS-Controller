@@ -4,7 +4,7 @@ from flask_cors import CORS
 import boto3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 import time
 
@@ -290,8 +290,328 @@ def format_size(size_bytes):
         i += 1
     return f"{size_bytes:.2f} {size_names[i]}"
 
+def get_cloudwatch_metrics():
+    """Get CloudWatch metrics for various AWS services"""
+    try:
+        cloudwatch = baseSession.client('cloudwatch')
+        metrics_data = {}
+        
+        # Get EC2 CPU utilization metrics for actual instances
+        try:
+            instances = list_ec2_instances()
+            ec2_cpu_data = []
+            
+            for instance in instances[:3]:  # Limit to first 3 instances to avoid API limits
+                if instance['state'] == 'running':
+                    try:
+                        response = cloudwatch.get_metric_statistics(
+                            Namespace='AWS/EC2',
+                            MetricName='CPUUtilization',
+                            Dimensions=[{'Name': 'InstanceId', 'Value': instance['instance_id']}],
+                            StartTime=datetime.now() - timedelta(hours=1),
+                            EndTime=datetime.now(),
+                            Period=300,
+                            Statistics=['Average', 'Maximum']
+                        )
+                        
+                        if response['Datapoints']:
+                            for datapoint in response['Datapoints']:
+                                datapoint['InstanceName'] = instance['name']
+                                datapoint['InstanceId'] = instance['instance_id']
+                            ec2_cpu_data.extend(response['Datapoints'])
+                    except Exception as e:
+                        print(f"Error getting metrics for instance {instance['instance_id']}: {e}")
+                        continue
+            
+            metrics_data['ec2_cpu'] = ec2_cpu_data
+        except Exception as e:
+            print(f"Error getting EC2 metrics: {e}")
+            metrics_data['ec2_cpu'] = []
+        
+        # Get RDS CPU utilization for actual databases
+        try:
+            rds_instances = list_rds_instances()
+            rds_cpu_data = []
+            
+            for db in rds_instances[:3]:  # Limit to first 3 databases
+                if db['state'] == 'available':
+                    try:
+                        response = cloudwatch.get_metric_statistics(
+                            Namespace='AWS/RDS',
+                            MetricName='CPUUtilization',
+                            Dimensions=[{'Name': 'DBInstanceIdentifier', 'Value': db['name']}],
+                            StartTime=datetime.now() - timedelta(hours=1),
+                            EndTime=datetime.now(),
+                            Period=300,
+                            Statistics=['Average', 'Maximum']
+                        )
+                        
+                        if response['Datapoints']:
+                            for datapoint in response['Datapoints']:
+                                datapoint['DBName'] = db['name']
+                                datapoint['Engine'] = db['engine']
+                            rds_cpu_data.extend(response['Datapoints'])
+                    except Exception as e:
+                        print(f"Error getting metrics for RDS {db['name']}: {e}")
+                        continue
+            
+            metrics_data['rds_cpu'] = rds_cpu_data
+        except Exception as e:
+            print(f"Error getting RDS metrics: {e}")
+            metrics_data['rds_cpu'] = []
+        
+        # Get Lambda duration metrics for actual functions
+        try:
+            lambda_functions = list_lambda_functions()
+            lambda_duration_data = []
+            
+            for func in lambda_functions[:3]:  # Limit to first 3 functions
+                try:
+                    response = cloudwatch.get_metric_statistics(
+                        Namespace='AWS/Lambda',
+                        MetricName='Duration',
+                        Dimensions=[{'Name': 'FunctionName', 'Value': func['name']}],
+                        StartTime=datetime.now() - timedelta(hours=1),
+                        EndTime=datetime.now(),
+                        Period=300,
+                        Statistics=['Average', 'Maximum']
+                    )
+                    
+                    if response['Datapoints']:
+                        for datapoint in response['Datapoints']:
+                            datapoint['FunctionName'] = func['name']
+                            datapoint['Runtime'] = func['runtime']
+                        lambda_duration_data.extend(response['Datapoints'])
+                except Exception as e:
+                    print(f"Error getting metrics for Lambda {func['name']}: {e}")
+                    continue
+            
+            metrics_data['lambda_duration'] = lambda_duration_data
+        except Exception as e:
+            print(f"Error getting Lambda metrics: {e}")
+            metrics_data['lambda_duration'] = []
+        
+        return metrics_data
+    except Exception as e:
+        print(f"Error getting CloudWatch metrics: {e}")
+        return {}
+
+def check_cloudwatch_security():
+    """Check CloudWatch for security-related events and alerts"""
+    security_alerts = []
+    
+    try:
+        cloudwatch = baseSession.client('cloudwatch')
+        logs = baseSession.client('logs')
+        
+        # Check for high CPU usage (potential DDoS or resource abuse)
+        try:
+            # Get EC2 instances with high CPU
+            instances = list_ec2_instances()
+            for instance in instances:
+                if instance['state'] == 'running':
+                    try:
+                        cpu_response = cloudwatch.get_metric_statistics(
+                            Namespace='AWS/EC2',
+                            MetricName='CPUUtilization',
+                            Dimensions=[{'Name': 'InstanceId', 'Value': instance['instance_id']}],
+                            StartTime=datetime.now() - timedelta(hours=1),
+                            EndTime=datetime.now(),
+                            Period=300,
+                            Statistics=['Average']
+                        )
+                        
+                        if cpu_response['Datapoints']:
+                            avg_cpu = cpu_response['Datapoints'][0]['Average']
+                            if avg_cpu > 90:
+                                security_alerts.append({
+                                    'severity': 'medium',
+                                    'message': f"EC2 instance '{instance['name']}' has high CPU usage ({avg_cpu:.1f}%)",
+                                    'service': 'CloudWatch',
+                                    'resource': instance['instance_id'],
+                                    'timestamp': datetime.now().isoformat()
+                                })
+                    except:
+                        pass
+        except Exception as e:
+            print(f"Error checking EC2 CPU metrics: {e}")
+        
+        # Check for unusual network activity
+        try:
+            for instance in instances:
+                if instance['state'] == 'running':
+                    try:
+                        network_response = cloudwatch.get_metric_statistics(
+                            Namespace='AWS/EC2',
+                            MetricName='NetworkIn',
+                            Dimensions=[{'Name': 'InstanceId', 'Value': instance['instance_id']}],
+                            StartTime=datetime.now() - timedelta(hours=1),
+                            EndTime=datetime.now(),
+                            Period=300,
+                            Statistics=['Sum']
+                        )
+                        
+                        if network_response['Datapoints']:
+                            network_in = network_response['Datapoints'][0]['Sum']
+                            # Alert if network traffic is unusually high (threshold: 1GB per 5 minutes)
+                            if network_in > 1073741824:  # 1GB in bytes
+                                security_alerts.append({
+                                    'severity': 'high',
+                                    'message': f"EC2 instance '{instance['name']}' has unusually high network traffic",
+                                    'service': 'CloudWatch',
+                                    'resource': instance['instance_id'],
+                                    'timestamp': datetime.now().isoformat()
+                                })
+                    except:
+                        pass
+        except Exception as e:
+            print(f"Error checking network metrics: {e}")
+        
+        # Check for failed Lambda executions
+        try:
+            lambda_functions = list_lambda_functions()
+            for func in lambda_functions:
+                try:
+                    error_response = cloudwatch.get_metric_statistics(
+                        Namespace='AWS/Lambda',
+                        MetricName='Errors',
+                        Dimensions=[{'Name': 'FunctionName', 'Value': func['name']}],
+                        StartTime=datetime.now() - timedelta(hours=1),
+                        EndTime=datetime.now(),
+                        Period=300,
+                        Statistics=['Sum']
+                    )
+                    
+                    if error_response['Datapoints']:
+                        error_count = error_response['Datapoints'][0]['Sum']
+                        if error_count > 5:  # Alert if more than 5 errors in 5 minutes
+                            security_alerts.append({
+                                'severity': 'medium',
+                                'message': f"Lambda function '{func['name']}' has {error_count} errors",
+                                'service': 'CloudWatch',
+                                'resource': func['name'],
+                                'timestamp': datetime.now().isoformat()
+                            })
+                except:
+                    pass
+        except Exception as e:
+            print(f"Error checking Lambda error metrics: {e}")
+        
+        # Check for RDS performance issues
+        try:
+            rds_instances = list_rds_instances()
+            for db in rds_instances:
+                try:
+                    rds_cpu_response = cloudwatch.get_metric_statistics(
+                        Namespace='AWS/RDS',
+                        MetricName='CPUUtilization',
+                        Dimensions=[{'Name': 'DBInstanceIdentifier', 'Value': db['name']}],
+                        StartTime=datetime.now() - timedelta(hours=1),
+                        EndTime=datetime.now(),
+                        Period=300,
+                        Statistics=['Average']
+                    )
+                    
+                    if rds_cpu_response['Datapoints']:
+                        avg_cpu = rds_cpu_response['Datapoints'][0]['Average']
+                        if avg_cpu > 80:
+                            security_alerts.append({
+                                'severity': 'medium',
+                                'message': f"RDS instance '{db['name']}' has high CPU usage ({avg_cpu:.1f}%)",
+                                'service': 'CloudWatch',
+                                'resource': db['name'],
+                                'timestamp': datetime.now().isoformat()
+                            })
+                except:
+                    pass
+        except Exception as e:
+            print(f"Error checking RDS metrics: {e}")
+        
+    except Exception as e:
+        print(f"Error during CloudWatch security check: {e}")
+    
+    return security_alerts
+
+def get_cloudwatch_logs():
+    """Get recent CloudWatch logs for monitoring"""
+    try:
+        logs = baseSession.client('logs')
+        log_data = {}
+        
+        # Get recent log events from CloudWatch Logs
+        try:
+            # Get available log groups
+            log_groups_response = logs.describe_log_groups(limit=10)
+            log_data['log_groups'] = log_groups_response['logGroups']
+            
+            # Get recent log events from multiple log groups
+            all_events = []
+            for log_group in log_groups_response['logGroups'][:3]:  # Limit to first 3 log groups
+                try:
+                    log_events_response = logs.filter_log_events(
+                        logGroupName=log_group['logGroupName'],
+                        startTime=int((datetime.now() - timedelta(hours=1)).timestamp() * 1000),
+                        endTime=int(datetime.now().timestamp() * 1000),
+                        limit=5
+                    )
+                    
+                    if log_events_response['events']:
+                        for event in log_events_response['events']:
+                            event['logGroupName'] = log_group['logGroupName']
+                        all_events.extend(log_events_response['events'])
+                except Exception as e:
+                    print(f"Error getting logs from {log_group['logGroupName']}: {e}")
+                    continue
+            
+            # Sort events by timestamp and take the most recent
+            all_events.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
+            log_data['recent_events'] = all_events[:10]  # Limit to 10 most recent events
+            
+        except Exception as e:
+            print(f"Error getting log groups: {e}")
+            log_data['log_groups'] = []
+            log_data['recent_events'] = []
+        
+        return log_data
+    except Exception as e:
+        print(f"Error getting CloudWatch logs: {e}")
+        return {}
+
+def get_cloudwatch_alarms():
+    """Get CloudWatch alarms for monitoring"""
+    try:
+        cloudwatch = baseSession.client('cloudwatch')
+        alarms_data = {}
+        
+        # Get all CloudWatch alarms
+        try:
+            alarms_response = cloudwatch.describe_alarms()
+            alarms_data['alarms'] = alarms_response['MetricAlarms']
+            
+            # Get alarm history for the last hour
+            if alarms_response['MetricAlarms']:
+                try:
+                    history_response = cloudwatch.describe_alarm_history(
+                        StartDate=datetime.now() - timedelta(hours=1),
+                        EndDate=datetime.now(),
+                        MaxRecords=10
+                    )
+                    alarms_data['recent_history'] = history_response['AlarmHistoryItems']
+                except Exception as e:
+                    print(f"Error getting alarm history: {e}")
+                    alarms_data['recent_history'] = []
+        except Exception as e:
+            print(f"Error getting alarms: {e}")
+            alarms_data['alarms'] = []
+            alarms_data['recent_history'] = []
+        
+        return alarms_data
+    except Exception as e:
+        print(f"Error getting CloudWatch alarms: {e}")
+        return {}
+
 def analyze_security():
-    """Basic security analysis"""
+    """Enhanced security analysis with CloudWatch monitoring"""
     global security_alerts
     security_alerts = []
     
@@ -332,6 +652,10 @@ def analyze_security():
                 'resource': bucket['name'],
                 'timestamp': datetime.now().isoformat()
             })
+        
+        # Check CloudWatch for security events
+        cloudwatch_alerts = check_cloudwatch_security()
+        security_alerts.extend(cloudwatch_alerts)
             
     except Exception as e:
         print(f"Error during security analysis: {e}")
@@ -370,7 +694,10 @@ def get_all_resources():
             'subnets': list_subnets(),
             'iam_users': list_iam_users(),
             'iam_roles': list_iam_roles(),
-            'security_alerts': security_alerts
+            'security_alerts': security_alerts,
+            'cloudwatch_metrics': get_cloudwatch_metrics(),
+            'cloudwatch_logs': get_cloudwatch_logs(),
+            'cloudwatch_alarms': get_cloudwatch_alarms()
         }
         return jsonify(resources)
     except Exception as e:
@@ -411,6 +738,50 @@ def get_security_alerts():
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     return jsonify(security_alerts)
+
+@app.route('/api/cloudwatch/metrics', methods=['GET'])
+def get_metrics():
+    """Get CloudWatch metrics"""
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        metrics = get_cloudwatch_metrics()
+        return jsonify(metrics)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/cloudwatch/logs', methods=['GET'])
+def get_logs():
+    """Get CloudWatch logs"""
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        logs = get_cloudwatch_logs()
+        return jsonify(logs)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/cloudwatch/security', methods=['GET'])
+def get_cloudwatch_security_alerts():
+    """Get CloudWatch security alerts"""
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        alerts = check_cloudwatch_security()
+        return jsonify(alerts)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/cloudwatch/alarms', methods=['GET'])
+def get_alarms():
+    """Get CloudWatch alarms"""
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        alarms = get_cloudwatch_alarms()
+        return jsonify(alarms)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/health', methods=['GET'])
 def health_check():

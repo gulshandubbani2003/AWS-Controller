@@ -102,7 +102,12 @@ Your AWS user/role needs the following permissions:
                 "s3:ListObjectsV2",
                 "iam:ListUsers",
                 "iam:ListRoles",
-                "iam:ListAttachedUserPolicies"
+                "iam:ListAttachedUserPolicies",
+                "cloudwatch:GetMetricStatistics",
+                "cloudwatch:DescribeAlarms",
+                "logs:DescribeLogGroups",
+                "logs:FilterLogEvents",
+                "logs:DescribeLogStreams"
             ],
             "Resource": "*"
         }
