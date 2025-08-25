@@ -30,7 +30,7 @@ import {
   MapPin
 } from 'lucide-react';
 
-const API_BASE_URL = 'http://localhost:5001/api';
+const API_BASE_URL = 'https://p2e0f010fc.execute-api.ap-south-1.amazonaws.com/dev/api';
 
 const AWSManagementDashboard = () => {
   const [credentials, setCredentials] = useState({ 

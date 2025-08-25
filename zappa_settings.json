@@ -1,0 +1,16 @@
+{
+    "dev": {
+        "aws_region": "ap-south-1",
+        "app_function": "one.app",
+        "exclude": [
+            "dateutil",
+            "s3transfer",
+            "concurrent"
+        ],
+        "profile_name": "default",
+        "project_name": "lambda-cloudsen",
+        "runtime": "python3.12",
+        "s3_bucket": "zappa-iwq9de9h6",
+        "timeout_seconds": 60
+    }
+}

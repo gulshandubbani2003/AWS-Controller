@@ -7,6 +7,7 @@ import logging
 from datetime import datetime, timedelta
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for React frontend
@@ -22,11 +23,15 @@ def create_aws_session(access_key, secret_key, region):
     """Create AWS session with provided credentials"""
     global baseSession, current_credentials
     try:
-        baseSession = boto3.Session(
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            region_name=region
-        )
+        # If no explicit keys are provided (e.g., running in Lambda), fall back to role-based creds
+        if not access_key or not secret_key:
+            baseSession = boto3.Session(region_name=region)
+        else:
+            baseSession = boto3.Session(
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
+                region_name=region
+            )
         current_credentials = {
             'access_key': access_key,
             'secret_key': secret_key,
@@ -36,6 +41,35 @@ def create_aws_session(access_key, secret_key, region):
     except Exception as e:
         print(f"Error creating AWS session: {e}")
         return False
+
+def _gather_resources_parallel():
+    """Fetch resource groups in parallel to reduce overall latency (Lambda-friendly)."""
+    work: dict[str, callable] = {
+        'ec2': list_ec2_instances,
+        'rds': list_rds_instances,
+        'lambda': list_lambda_functions,
+        's3': list_s3_buckets,
+        'vpc': list_vpc,
+        'subnets': list_subnets,
+        'iam_users': list_iam_users,
+        'iam_roles': list_iam_roles,
+        'cloudwatch_metrics': get_cloudwatch_metrics,
+        'cloudwatch_logs': get_cloudwatch_logs,
+        'cloudwatch_alarms': get_cloudwatch_alarms,
+    }
+    results = { 'security_alerts': security_alerts }
+    # Use a moderate pool size to stay within Lambda CPU limits
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_key = { executor.submit(fn): key for key, fn in work.items() }
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            try:
+                results[key] = future.result()
+            except Exception as err:
+                print(f"Error fetching {key}: {err}")
+                # Return empty on failure to avoid blocking UI
+                results[key] = [] if key not in ('cloudwatch_metrics', 'cloudwatch_logs', 'cloudwatch_alarms') else {}
+    return results
 
 def list_ec2_instances():
     """Enhanced version of your EC2 listing function"""
@@ -685,20 +719,8 @@ def get_all_resources():
         return jsonify({'error': 'Not connected to AWS'}), 401
     
     try:
-        resources = {
-            'ec2': list_ec2_instances(),
-            'rds': list_rds_instances(),
-            'lambda': list_lambda_functions(),
-            's3': list_s3_buckets(),
-            'vpc': list_vpc(),
-            'subnets': list_subnets(),
-            'iam_users': list_iam_users(),
-            'iam_roles': list_iam_roles(),
-            'security_alerts': security_alerts,
-            'cloudwatch_metrics': get_cloudwatch_metrics(),
-            'cloudwatch_logs': get_cloudwatch_logs(),
-            'cloudwatch_alarms': get_cloudwatch_alarms()
-        }
+        # Parallelize to reduce latency and avoid Lambda timeouts
+        resources = _gather_resources_parallel()
         return jsonify(resources)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
