@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for React frontend
@@ -18,6 +19,46 @@ current_credentials = {}
 
 # Security monitoring alerts storage
 security_alerts = []
+
+# Services map for controller features (merged from aws-service-controller)
+services_map = {}
+try:
+    services_map_path = os.path.join(os.path.dirname(__file__), 'servicesMap.json')
+    with open(services_map_path, 'r') as f:
+        services_map = json.load(f)
+except Exception as e:
+    print(f"Warning: could not load servicesMap.json: {e}")
+
+def _parse_resource_id(resource: object) -> str:
+    """Extract the concrete AWS identifier from entries like 'name:i-1234' or dicts."""
+    if isinstance(resource, str):
+        return resource.split(':', 1)[1] if ':' in resource else resource
+    if isinstance(resource, dict):
+        return resource.get('id') or resource.get('name') or ''
+    return str(resource)
+
+def _find_queue_url(sqs_client, queue_name: str) -> str | None:
+    try:
+        resp = sqs_client.list_queues(QueueNamePrefix=queue_name)
+        for url in resp.get('QueueUrls', []):
+            last = url.rsplit('/', 1)[-1]
+            if last == queue_name or queue_name in url:
+                return url
+    except Exception as err:
+        print(f"Error listing queues: {err}")
+    return None
+
+def _get_latest_lambda_version(lambda_client, function_name: str) -> str | None:
+    try:
+        resp = lambda_client.list_versions_by_function(FunctionName=function_name)
+        versions = [v for v in resp.get('Versions', []) if v.get('Version') != '$LATEST']
+        if not versions:
+            return None
+        versions.sort(key=lambda v: int(v['Version']), reverse=True)
+        return versions[0]['Version']
+    except Exception as err:
+        print(f"Error getting latest lambda version: {err}")
+        return None
 
 def create_aws_session(access_key, secret_key, region):
     """Create AWS session with provided credentials"""
@@ -808,6 +849,459 @@ def get_alarms():
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({'status': 'healthy', 'connected': baseSession is not None})
+
+# -----------------------------
+# Unified Service Controller API
+# -----------------------------
+
+@app.route('/api/services', methods=['GET'])
+def list_applications():
+    if not services_map:
+        return jsonify({'applications': [], 'total': 0})
+    applications = list(services_map.keys())
+    return jsonify({'applications': applications, 'total': len(applications)})
+
+@app.route('/api/services/<appName>', methods=['GET'])
+def get_application_services(appName: str):
+    app_services = services_map.get(appName)
+    if not app_services:
+        return jsonify({'error': 'Application not found'}), 404
+    return jsonify({'application': appName, 'services': app_services})
+
+@app.route('/api/services/<appName>/<serviceType>', methods=['GET'])
+def get_service_details_for_app(appName: str, serviceType: str):
+    app_services = services_map.get(appName)
+    if not app_services:
+        return jsonify({'error': 'Application not found'}), 404
+    service_details = app_services.get(serviceType)
+    if not service_details:
+        return jsonify({'error': 'Service type not found'}), 404
+    return jsonify({'application': appName, 'serviceType': serviceType, 'resources': service_details})
+
+@app.route('/api/services/<appName>/<serviceType>/status', methods=['GET'])
+def get_service_status(appName: str, serviceType: str):
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    app_services = services_map.get(appName)
+    if not app_services:
+        return jsonify({'error': 'Application not found'}), 404
+    service_details = app_services.get(serviceType)
+    if not service_details:
+        return jsonify({'error': 'Service type not found'}), 404
+
+    results = []
+    try:
+        if serviceType == 'ec2':
+            ec2 = baseSession.client('ec2')
+            for resource in service_details:
+                rid = _parse_resource_id(resource)
+                try:
+                    resp = ec2.describe_instances(InstanceIds=[rid])
+                    inst = resp['Reservations'][0]['Instances'][0]
+                    state = inst['State']['Name']
+                    results.append({
+                        'resourceId': rid,
+                        'status': {
+                            'instanceId': rid,
+                            'status': state,
+                            'health': 'healthy' if state == 'running' else 'unhealthy',
+                            'uptime': int((datetime.now(inst.get('LaunchTime').tzinfo) - inst['LaunchTime']).total_seconds() // 86400) if inst.get('LaunchTime') else 0
+                        },
+                        'lastChecked': datetime.now().isoformat()
+                    })
+                except Exception as err:
+                    print(f"Error getting EC2 status for {rid}: {err}")
+                    results.append({'resourceId': rid, 'status': 'error', 'error': str(err), 'lastChecked': datetime.now().isoformat()})
+
+        elif serviceType == 'lambda':
+            lam = baseSession.client('lambda')
+            for resource in service_details:
+                fname = _parse_resource_id(resource)
+                try:
+                    conf = lam.get_function(FunctionName=fname)['Configuration']
+                    state = conf.get('State', 'Unknown')
+                    results.append({
+                        'resourceId': fname,
+                        'status': {
+                            'functionName': fname,
+                            'status': state,
+                            'health': 'healthy' if state == 'Active' else 'unhealthy',
+                            'lastModified': conf.get('LastModified'),
+                            'memorySize': conf.get('MemorySize'),
+                            'timeout': conf.get('Timeout')
+                        },
+                        'lastChecked': datetime.now().isoformat()
+                    })
+                except Exception as err:
+                    print(f"Error getting Lambda status for {fname}: {err}")
+                    results.append({'resourceId': fname, 'status': 'error', 'error': str(err), 'lastChecked': datetime.now().isoformat()})
+
+        elif serviceType == 'rds':
+            rds = baseSession.client('rds')
+            for resource in service_details:
+                dbid = _parse_resource_id(resource)
+                try:
+                    resp = rds.describe_db_instances(DBInstanceIdentifier=dbid)
+                    inst = resp['DBInstances'][0]
+                    state = inst['DBInstanceStatus']
+                    results.append({
+                        'resourceId': dbid,
+                        'status': {
+                            'dbInstanceIdentifier': dbid,
+                            'status': state,
+                            'health': 'healthy' if state == 'available' else 'unhealthy',
+                            'engine': inst.get('Engine'),
+                            'engineVersion': inst.get('EngineVersion')
+                        },
+                        'lastChecked': datetime.now().isoformat()
+                    })
+                except Exception as err:
+                    print(f"Error getting RDS status for {dbid}: {err}")
+                    results.append({'resourceId': dbid, 'status': 'error', 'error': str(err), 'lastChecked': datetime.now().isoformat()})
+
+        elif serviceType == 'sqs':
+            sqs = baseSession.client('sqs')
+            for resource in service_details:
+                qname = _parse_resource_id(resource)
+                try:
+                    qurl = _find_queue_url(sqs, qname)
+                    if not qurl:
+                        results.append({'resourceId': qname, 'status': {'status': 'unknown', 'health': 'unknown', 'message': 'Queue not found'}})
+                        continue
+                    attrs = sqs.get_queue_attributes(QueueUrl=qurl, AttributeNames=['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible', 'ApproximateNumberOfMessagesDelayed', 'CreatedTimestamp', 'LastModifiedTimestamp'])['Attributes']
+                    not_visible = int(attrs.get('ApproximateNumberOfMessagesNotVisible', '0'))
+                    results.append({
+                        'resourceId': qname,
+                        'status': {
+                            'queueName': qname,
+                            'queueUrl': qurl,
+                            'approximateNumberOfMessages': int(attrs.get('ApproximateNumberOfMessages', '0')),
+                            'approximateNumberOfMessagesNotVisible': not_visible,
+                            'approximateNumberOfMessagesDelayed': int(attrs.get('ApproximateNumberOfMessagesDelayed', '0')),
+                            'createdTimestamp': attrs.get('CreatedTimestamp'),
+                            'lastModifiedTimestamp': attrs.get('LastModifiedTimestamp'),
+                            'health': 'healthy' if not_visible < 100 else 'warning',
+                            'status': 'available'
+                        },
+                        'lastChecked': datetime.now().isoformat()
+                    })
+                except Exception as err:
+                    print(f"Error getting SQS status for {qname}: {err}")
+                    results.append({'resourceId': qname, 'status': 'error', 'error': str(err), 'lastChecked': datetime.now().isoformat()})
+        else:
+            return jsonify({'error': 'Service type not supported'}), 400
+
+        return jsonify({'application': appName, 'serviceType': serviceType, 'resources': results, 'lastChecked': datetime.now().isoformat()})
+    except Exception as e:
+        print(f"Error fetching service status: {e}")
+        return jsonify({'error': 'Failed to fetch service status'}), 500
+
+@app.route('/api/services/<appName>/<serviceType>/start', methods=['POST'])
+def start_service_resource(appName: str, serviceType: str):
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    data = request.json or {}
+    resource_id = data.get('resourceId')
+    if not resource_id:
+        return jsonify({'error': 'resourceId is required'}), 400
+    try:
+        if serviceType == 'ec2':
+            ec2 = baseSession.client('ec2')
+            resp = ec2.start_instances(InstanceIds=[resource_id])
+            return jsonify({'success': True, 'application': appName, 'serviceType': serviceType, 'resourceId': resource_id, 'result': resp.get('StartingInstances', [])})
+        if serviceType == 'rds':
+            rds = baseSession.client('rds')
+            resp = rds.start_db_instance(DBInstanceIdentifier=resource_id)
+            return jsonify({'success': True, 'application': appName, 'serviceType': serviceType, 'resourceId': resource_id, 'result': {'status': resp['DBInstance']['DBInstanceStatus']}})
+        if serviceType == 'lambda':
+            lam = baseSession.client('lambda')
+            payload = data.get('payload', {})
+            resp = lam.invoke(FunctionName=resource_id, Payload=json.dumps(payload).encode('utf-8'))
+            raw = resp.get('Payload').read() if resp.get('Payload') else b''
+            parsed = None
+            try:
+                parsed = json.loads(raw.decode('utf-8')) if raw else None
+            except Exception:
+                parsed = raw.decode('utf-8') if raw else None
+            return jsonify({'success': True, 'application': appName, 'serviceType': serviceType, 'resourceId': resource_id, 'result': {'statusCode': resp.get('StatusCode'), 'payload': parsed, 'functionError': resp.get('FunctionError')}})
+        return jsonify({'error': 'Start operation not supported for this service type'}), 400
+    except Exception as e:
+        print(f"Error starting service resource: {e}")
+        return jsonify({'error': 'Failed to start service', 'details': str(e)}), 500
+
+@app.route('/api/services/<appName>/<serviceType>/stop', methods=['POST'])
+def stop_service_resource(appName: str, serviceType: str):
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    data = request.json or {}
+    resource_id = data.get('resourceId')
+    if not resource_id:
+        return jsonify({'error': 'resourceId is required'}), 400
+    try:
+        if serviceType == 'ec2':
+            ec2 = baseSession.client('ec2')
+            resp = ec2.stop_instances(InstanceIds=[resource_id])
+            return jsonify({'success': True, 'application': appName, 'serviceType': serviceType, 'resourceId': resource_id, 'result': resp.get('StoppingInstances', [])})
+        if serviceType == 'rds':
+            rds = baseSession.client('rds')
+            resp = rds.stop_db_instance(DBInstanceIdentifier=resource_id)
+            return jsonify({'success': True, 'application': appName, 'serviceType': serviceType, 'resourceId': resource_id, 'result': {'status': resp['DBInstance']['DBInstanceStatus']}})
+        return jsonify({'error': 'Stop operation not supported for this service type'}), 400
+    except Exception as e:
+        print(f"Error stopping service resource: {e}")
+        return jsonify({'error': 'Failed to stop service', 'details': str(e)}), 500
+
+@app.route('/api/services/<appName>/sqs/<queueName>/enable', methods=['POST'])
+def enable_queue(appName: str, queueName: str):
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        sqs = baseSession.client('sqs')
+        qurl = _find_queue_url(sqs, queueName)
+        if not qurl:
+            return jsonify({'error': 'Queue not found'}), 404
+        test_message = {
+            'action': 'enable',
+            'timestamp': datetime.now().isoformat(),
+            'message': 'Queue enabled via dashboard'
+        }
+        sqs.send_message(QueueUrl=qurl, MessageBody=json.dumps(test_message))
+        return jsonify({'queueName': queueName, 'enabled': True, 'message': 'Queue enabled successfully'})
+    except Exception as e:
+        print(f"Error enabling SQS queue: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/services/<appName>/sqs/<queueName>/disable', methods=['POST'])
+def disable_queue(appName: str, queueName: str):
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        sqs = baseSession.client('sqs')
+        qurl = _find_queue_url(sqs, queueName)
+        if not qurl:
+            return jsonify({'error': 'Queue not found'}), 404
+        sqs.purge_queue(QueueUrl=qurl)
+        return jsonify({'queueName': queueName, 'enabled': False, 'message': 'Queue disabled (all messages purged)'})
+    except Exception as e:
+        print(f"Error disabling SQS queue: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/services/<appName>/lambda/<functionName>/enable-concurrency', methods=['POST'])
+def enable_provisioned_concurrency(appName: str, functionName: str):
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    data = request.json or {}
+    concurrent = int(data.get('concurrentExecutions', 1))
+    try:
+        lam = baseSession.client('lambda')
+        version = _get_latest_lambda_version(lam, functionName)
+        if not version:
+            return jsonify({'error': 'No published version found for this function'}), 400
+        lam.put_provisioned_concurrency_config(FunctionName=functionName, Qualifier=version, ProvisionedConcurrentExecutions=concurrent)
+        return jsonify({'success': True, 'application': appName, 'functionName': functionName, 'version': version, 'provisionedConcurrentExecutions': concurrent, 'status': 'enabled', 'lastModified': datetime.now().isoformat()})
+    except Exception as e:
+        print(f"Error enabling provisioned concurrency: {e}")
+        return jsonify({'error': 'Failed to enable provisioned concurrency', 'details': str(e)}), 500
+
+@app.route('/api/services/<appName>/lambda/<functionName>/disable-concurrency', methods=['POST'])
+def disable_provisioned_concurrency(appName: str, functionName: str):
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        lam = baseSession.client('lambda')
+        version = _get_latest_lambda_version(lam, functionName)
+        if not version:
+            return jsonify({'error': 'No published version found for this function'}), 400
+        lam.delete_provisioned_concurrency_config(FunctionName=functionName, Qualifier=version)
+        return jsonify({'success': True, 'application': appName, 'functionName': functionName, 'version': version, 'status': 'disabled', 'lastModified': datetime.now().isoformat()})
+    except Exception as e:
+        print(f"Error disabling provisioned concurrency: {e}")
+        return jsonify({'error': 'Failed to disable provisioned concurrency', 'details': str(e)}), 500
+
+@app.route('/api/services/<appName>/lambda/<functionName>/concurrency-status', methods=['GET'])
+def get_provisioned_concurrency_status(appName: str, functionName: str):
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        lam = baseSession.client('lambda')
+        version = _get_latest_lambda_version(lam, functionName)
+        if not version:
+            return jsonify({'application': appName, 'functionName': functionName, 'result': {'status': 'no_published_version', 'message': 'No published version found'}})
+        try:
+            resp = lam.get_provisioned_concurrency_config(FunctionName=functionName, Qualifier=version)
+            pce = resp.get('ProvisionedConcurrencyConfig', {}).get('ProvisionedConcurrentExecutions', 0)
+            return jsonify({'application': appName, 'functionName': functionName, 'result': {'status': 'enabled', 'version': version, 'provisionedConcurrentExecutions': pce, 'lastModified': datetime.now().isoformat()}})
+        except Exception as inner:
+            if 'ResourceNotFoundException' in str(inner):
+                return jsonify({'application': appName, 'functionName': functionName, 'result': {'status': 'disabled', 'message': 'No provisioned concurrency configured'}})
+            raise
+    except Exception as e:
+        print(f"Error getting provisioned concurrency status: {e}")
+        return jsonify({'error': 'Failed to get provisioned concurrency status', 'details': str(e)}), 500
+
+# -----------------------------
+# Direct action APIs for native tabs (EC2/Lambda/SQS)
+# -----------------------------
+
+@app.route('/api/ec2/start', methods=['POST'])
+def ec2_start_instances():
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    data = request.json or {}
+    instance_id = data.get('instanceId') or data.get('resourceId')
+    if not instance_id:
+        return jsonify({'error': 'instanceId is required'}), 400
+    try:
+        ec2 = baseSession.client('ec2')
+        resp = ec2.start_instances(InstanceIds=[instance_id])
+        return jsonify({'success': True, 'result': resp.get('StartingInstances', [])})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/ec2/stop', methods=['POST'])
+def ec2_stop_instances():
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    data = request.json or {}
+    instance_id = data.get('instanceId') or data.get('resourceId')
+    if not instance_id:
+        return jsonify({'error': 'instanceId is required'}), 400
+    try:
+        ec2 = baseSession.client('ec2')
+        resp = ec2.stop_instances(InstanceIds=[instance_id])
+        return jsonify({'success': True, 'result': resp.get('StoppingInstances', [])})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/lambda/<functionName>/enable-concurrency', methods=['POST'])
+def lambda_enable_concurrency(functionName: str):
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    data = request.json or {}
+    concurrent = int(data.get('concurrentExecutions', 1))
+    try:
+        lam = baseSession.client('lambda')
+        version = _get_latest_lambda_version(lam, functionName)
+        if not version:
+            return jsonify({'error': 'No published version found for this function'}), 400
+        lam.put_provisioned_concurrency_config(FunctionName=functionName, Qualifier=version, ProvisionedConcurrentExecutions=concurrent)
+        return jsonify({'success': True, 'functionName': functionName, 'version': version, 'provisionedConcurrentExecutions': concurrent})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/lambda/<functionName>/disable-concurrency', methods=['POST'])
+def lambda_disable_concurrency(functionName: str):
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        lam = baseSession.client('lambda')
+        version = _get_latest_lambda_version(lam, functionName)
+        if not version:
+            return jsonify({'error': 'No published version found for this function'}), 400
+        lam.delete_provisioned_concurrency_config(FunctionName=functionName, Qualifier=version)
+        return jsonify({'success': True, 'functionName': functionName, 'version': version})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/lambda/<functionName>/concurrency-status', methods=['GET'])
+def lambda_concurrency_status(functionName: str):
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        lam = baseSession.client('lambda')
+        version = _get_latest_lambda_version(lam, functionName)
+        if not version:
+            return jsonify({'status': 'no_published_version'})
+        try:
+            resp = lam.get_provisioned_concurrency_config(FunctionName=functionName, Qualifier=version)
+            pce = resp.get('ProvisionedConcurrencyConfig', {}).get('ProvisionedConcurrentExecutions', 0)
+            return jsonify({'status': 'enabled', 'version': version, 'provisionedConcurrentExecutions': pce})
+        except Exception as inner:
+            if 'ResourceNotFoundException' in str(inner):
+                return jsonify({'status': 'disabled'})
+            raise
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/lambda/invoke', methods=['POST'])
+def lambda_invoke():
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    data = request.json or {}
+    function_name = data.get('functionName')
+    payload = data.get('payload', {})
+    if not function_name:
+        return jsonify({'error': 'functionName is required'}), 400
+    try:
+        lam = baseSession.client('lambda')
+        resp = lam.invoke(FunctionName=function_name, Payload=json.dumps(payload).encode('utf-8'))
+        raw = resp.get('Payload').read() if resp.get('Payload') else b''
+        body = None
+        try:
+            body = json.loads(raw.decode('utf-8')) if raw else None
+        except Exception:
+            body = raw.decode('utf-8') if raw else None
+        return jsonify({'statusCode': resp.get('StatusCode'), 'functionError': resp.get('FunctionError'), 'payload': body})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/sqs', methods=['GET'])
+def list_sqs():
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        prefix = request.args.get('prefix')
+        sqs = baseSession.client('sqs')
+        kwargs = {'QueueNamePrefix': prefix} if prefix else {}
+        resp = sqs.list_queues(**kwargs)
+        names = []
+        for url in resp.get('QueueUrls', []) or []:
+            names.append(url.rsplit('/', 1)[-1])
+        return jsonify({'queues': names})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/sqs/status/<queueName>', methods=['GET'])
+def sqs_status(queueName: str):
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        sqs = baseSession.client('sqs')
+        qurl = _find_queue_url(sqs, queueName)
+        if not qurl:
+            return jsonify({'error': 'Queue not found'}), 404
+        attrs = sqs.get_queue_attributes(QueueUrl=qurl, AttributeNames=['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible', 'ApproximateNumberOfMessagesDelayed', 'CreatedTimestamp', 'LastModifiedTimestamp'])['Attributes']
+        return jsonify({'queueName': queueName, **attrs})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/sqs/enable/<queueName>', methods=['POST'])
+def sqs_enable(queueName: str):
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        sqs = baseSession.client('sqs')
+        qurl = _find_queue_url(sqs, queueName)
+        if not qurl:
+            return jsonify({'error': 'Queue not found'}), 404
+        sqs.send_message(QueueUrl=qurl, MessageBody=json.dumps({'action': 'enable', 'timestamp': datetime.now().isoformat()}))
+        return jsonify({'queueName': queueName, 'enabled': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/sqs/disable/<queueName>', methods=['POST'])
+def sqs_disable(queueName: str):
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        sqs = baseSession.client('sqs')
+        qurl = _find_queue_url(sqs, queueName)
+        if not qurl:
+            return jsonify({'error': 'Queue not found'}), 404
+        sqs.purge_queue(QueueUrl=qurl)
+        return jsonify({'queueName': queueName, 'enabled': False})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5001)

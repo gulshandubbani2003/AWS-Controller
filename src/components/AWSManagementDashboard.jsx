@@ -30,7 +30,7 @@ import {
   MapPin
 } from 'lucide-react';
 
-const API_BASE_URL = 'https://p2e0f010fc.execute-api.ap-south-1.amazonaws.com/dev/api';
+const API_BASE_URL = import.meta?.env?.VITE_API_BASE_URL || 'http://localhost:5001/api';
 
 const AWSManagementDashboard = () => {
   const [credentials, setCredentials] = useState({ 
@@ -56,6 +56,14 @@ const AWSManagementDashboard = () => {
     cloudwatch_alarms: {}
   });
   const [refreshing, setRefreshing] = useState(false);
+
+	// Controller state
+	const [controllerApps, setControllerApps] = useState([]);
+	const [controllerLoading, setControllerLoading] = useState(false);
+	const [selectedApp, setSelectedApp] = useState('');
+	const [selectedServiceType, setSelectedServiceType] = useState('ec2');
+	const [controllerResources, setControllerResources] = useState([]);
+	const [lambdaConcurrency, setLambdaConcurrency] = useState({});
 
   const fetchAllResources = async () => {
     try {
@@ -101,6 +109,221 @@ const AWSManagementDashboard = () => {
       setLoading(false);
     }
   };
+
+	// -----------------------------
+	// Service Controller functions
+	// -----------------------------
+  const fetchApplications = async () => {
+		try {
+			setControllerLoading(true);
+			const res = await fetch(`${API_BASE_URL}/services`);
+			if (res.ok) {
+				const data = await res.json();
+				setControllerApps(data.applications || []);
+				if (!selectedApp && (data.applications || []).length > 0) {
+					setSelectedApp(data.applications[0]);
+				}
+			} else {
+				console.error('Failed to load applications');
+			}
+		} catch (e) {
+			console.error('Error loading applications:', e);
+		} finally {
+			setControllerLoading(false);
+		}
+	};
+
+  const fetchControllerStatus = async (_app = '', type = selectedServiceType) => {
+    try {
+      setControllerLoading(true);
+      if (type === 'sqs') {
+        const res = await fetch(`${API_BASE_URL}/sqs`);
+        if (res.ok) {
+          const data = await res.json();
+          const resources = (data.queues || []).map(q => ({ resourceId: q }));
+          setControllerResources(resources);
+        } else {
+          setControllerResources([]);
+        }
+      } else if (type === 'lambda') {
+        // No list endpoint: use already loaded awsData.lambda names
+        const resources = (awsData.lambda || []).map(f => ({ resourceId: f.name }));
+        setControllerResources(resources);
+        // populate concurrency map best-effort
+        const entries = await Promise.all(resources.map(async r => {
+          try {
+            const s = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(r.resourceId)}/concurrency-status`);
+            if (s.ok) {
+              const payload = await s.json();
+              return [r.resourceId, payload || { status: 'unknown' }];
+            }
+          } catch {}
+          return [r.resourceId, { status: 'unknown' }];
+        }));
+        const map = {};
+        entries.forEach(([k, v]) => { map[k] = v; });
+        setLambdaConcurrency(map);
+      } else {
+        setControllerResources([]);
+      }
+    } catch (e) {
+      console.error('Error loading data:', e);
+      setControllerResources([]);
+    } finally {
+      setControllerLoading(false);
+    }
+  };
+
+  const startResource = async (resourceId) => {
+		try {
+			setControllerLoading(true);
+			const url = selectedServiceType === 'ec2' ? `${API_BASE_URL}/ec2/start` : selectedServiceType === 'lambda' ? `${API_BASE_URL}/lambda/invoke` : `${API_BASE_URL}/services/${encodeURIComponent(selectedApp)}/${encodeURIComponent(selectedServiceType)}/start`;
+			const body = selectedServiceType === 'ec2' ? { instanceId: resourceId } : selectedServiceType === 'lambda' ? { functionName: resourceId } : { resourceId };
+			const res = await fetch(url, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body)
+			});
+			if (!res.ok) {
+				const err = await res.json().catch(() => ({}));
+				alert(`Failed to start: ${err.error || res.status}`);
+			}
+			await fetchControllerStatus();
+		} catch (e) {
+			console.error('Error starting resource:', e);
+		} finally {
+			setControllerLoading(false);
+		}
+	};
+
+  const stopResource = async (resourceId) => {
+		try {
+			setControllerLoading(true);
+			const url = selectedServiceType === 'ec2' ? `${API_BASE_URL}/ec2/stop` : `${API_BASE_URL}/services/${encodeURIComponent(selectedApp)}/${encodeURIComponent(selectedServiceType)}/stop`;
+			const body = selectedServiceType === 'ec2' ? { instanceId: resourceId } : { resourceId };
+			const res = await fetch(url, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body)
+			});
+			if (!res.ok) {
+				const err = await res.json().catch(() => ({}));
+				alert(`Failed to stop: ${err.error || res.status}`);
+			}
+			await fetchControllerStatus();
+		} catch (e) {
+			console.error('Error stopping resource:', e);
+		} finally {
+			setControllerLoading(false);
+		}
+	};
+
+	const enableQueue = async (queueName) => {
+		try {
+			setControllerLoading(true);
+      const res = await fetch(`${API_BASE_URL}/sqs/enable/${encodeURIComponent(queueName)}`, { method: 'POST' });
+			if (!res.ok) {
+				const err = await res.json().catch(() => ({}));
+				alert(`Failed to enable queue: ${err.error || res.status}`);
+			}
+      await fetchControllerStatus('', 'sqs');
+		} catch (e) {
+			console.error('Error enabling queue:', e);
+		} finally {
+			setControllerLoading(false);
+		}
+	};
+
+	const disableQueue = async (queueName) => {
+		try {
+			setControllerLoading(true);
+      const res = await fetch(`${API_BASE_URL}/sqs/disable/${encodeURIComponent(queueName)}`, { method: 'POST' });
+			if (!res.ok) {
+				const err = await res.json().catch(() => ({}));
+				alert(`Failed to disable queue: ${err.error || res.status}`);
+			}
+      await fetchControllerStatus('', 'sqs');
+		} catch (e) {
+			console.error('Error disabling queue:', e);
+		} finally {
+			setControllerLoading(false);
+		}
+	};
+
+  const invokeLambda = async (functionName) => {
+    try {
+      setControllerLoading(true);
+      const res = await fetch(`${API_BASE_URL}/lambda/invoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ functionName })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(`Failed to invoke: ${err.error || res.status}`);
+        return;
+      }
+      await res.json();
+      alert('Invocation sent.');
+    } catch (e) {
+      console.error('Error invoking lambda:', e);
+      alert('Invocation failed');
+    } finally {
+      setControllerLoading(false);
+    }
+  };
+
+	const enableLambdaConcurrency = async (functionName, concurrentExecutions = 1) => {
+		try {
+			setControllerLoading(true);
+			const res = await fetch(`${API_BASE_URL}/services/${encodeURIComponent(selectedApp)}/lambda/${encodeURIComponent(functionName)}/enable-concurrency`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ concurrentExecutions })
+			});
+			if (!res.ok) {
+				const err = await res.json().catch(() => ({}));
+				alert(`Failed to enable concurrency: ${err.error || res.status}`);
+			}
+			await fetchControllerStatus(selectedApp, 'lambda');
+		} catch (e) {
+			console.error('Error enabling provisioned concurrency:', e);
+		} finally {
+			setControllerLoading(false);
+		}
+	};
+
+	const disableLambdaConcurrency = async (functionName) => {
+		try {
+			setControllerLoading(true);
+			const res = await fetch(`${API_BASE_URL}/services/${encodeURIComponent(selectedApp)}/lambda/${encodeURIComponent(functionName)}/disable-concurrency`, { method: 'POST' });
+			if (!res.ok) {
+				const err = await res.json().catch(() => ({}));
+				alert(`Failed to disable concurrency: ${err.error || res.status}`);
+			}
+			await fetchControllerStatus(selectedApp, 'lambda');
+		} catch (e) {
+			console.error('Error disabling provisioned concurrency:', e);
+		} finally {
+			setControllerLoading(false);
+		}
+	};
+
+	// Load controller apps when switching to the tab the first time
+	useEffect(() => {
+		if (isConnected && activeTab === 'controller' && controllerApps.length === 0) {
+			fetchApplications();
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [activeTab, isConnected]);
+
+	// Refresh status when selection changes
+	useEffect(() => {
+		if (isConnected && activeTab === 'controller' && selectedApp) {
+			fetchControllerStatus(selectedApp, selectedServiceType);
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [selectedApp, selectedServiceType]);
 
   const getStatusColor = (status) => {
     switch (status?.toLowerCase()) {
@@ -257,6 +480,7 @@ const AWSManagementDashboard = () => {
               { id: 'ec2', name: 'EC2 Instances', icon: Server },
               { id: 'rds', name: 'RDS', icon: Database },
               { id: 'lambda', name: 'Lambda', icon: Zap },
+              { id: 'sqs', name: 'SQS', icon: MemoryStick },
               { id: 's3', name: 'S3 Buckets', icon: HardDrive },
               { id: 'vpc', name: 'VPC', icon: Network },
               { id: 'iam', name: 'IAM', icon: Users },
@@ -420,6 +644,7 @@ const AWSManagementDashboard = () => {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">IP Addresses</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">AZ</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
@@ -447,6 +672,12 @@ const AWSManagementDashboard = () => {
                           <MapPin className="h-3 w-3 mr-1" />
                           {instance.availability_zone}
                         </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm">
+                        <div className="flex space-x-2">
+                          <button onClick={() => startResource(instance.instance_id)} className="px-3 py-1 rounded bg-green-600 hover:bg-green-700 text-white">Start</button>
+                          <button onClick={() => stopResource(instance.instance_id)} className="px-3 py-1 rounded bg-yellow-600 hover:bg-yellow-700 text-white">Stop</button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -543,6 +774,11 @@ const AWSManagementDashboard = () => {
                         <p className="font-medium">{new Date(func.last_modified).toLocaleDateString()}</p>
                       </div>
                     </div>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <button onClick={() => invokeLambda(func.name)} className="px-3 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white">Invoke</button>
+                      <button onClick={() => enableLambdaConcurrency(func.name, 1)} className="px-3 py-1 rounded bg-green-600 hover:bg-green-700 text-white">Enable Concurrency</button>
+                      <button onClick={() => disableLambdaConcurrency(func.name)} className="px-3 py-1 rounded bg-red-600 hover:bg-red-700 text-white">Disable Concurrency</button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -588,6 +824,53 @@ const AWSManagementDashboard = () => {
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'sqs' && (
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200">
+            <div className="px-6 py-4 border-b border-gray-200">
+              <h2 className="text-lg font-semibold text-gray-900 flex items-center">
+                <MemoryStick className="h-5 w-5 mr-2" />
+                SQS Queues
+              </h2>
+            </div>
+            <div className="p-6">
+              <div className="mb-4 flex items-center space-x-2">
+                <button onClick={() => fetchControllerStatus(selectedApp || 'Order Execution', 'sqs')} className="px-3 py-2 rounded bg-gray-100 hover:bg-gray-200 text-sm text-gray-700">Refresh</button>
+              </div>
+              {/* Basic list: status will render inside actions on demand */}
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Queue</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {(controllerResources || []).map((q) => (
+                      <tr key={q.resourceId} className="hover:bg-gray-50">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{q.resourceId}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                          <div className="flex space-x-2">
+                            <button onClick={async () => {
+                              try {
+                                const res = await fetch(`${API_BASE_URL}/sqs/status/${encodeURIComponent(q.resourceId)}`);
+                                const data = await res.json();
+                                alert(`Approx Messages: ${data.ApproximateNumberOfMessages || 0}`);
+                              } catch (e) {}
+                            }} className="px-3 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white">Status</button>
+                            <button onClick={() => enableQueue(q.resourceId)} className="px-3 py-1 rounded bg-green-600 hover:bg-green-700 text-white">Enable</button>
+                            <button onClick={() => disableQueue(q.resourceId)} className="px-3 py-1 rounded bg-red-600 hover:bg-red-700 text-white">Disable</button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         )}
@@ -981,6 +1264,8 @@ const AWSManagementDashboard = () => {
             </div>
           </div>
         )}
+
+        {/* Service Controller removed per request */}
       </div>
     </div>
   );

@@ -156,6 +156,22 @@ The Flask backend provides the following API endpoints:
 - `GET /api/security` - Get security alerts
 - `GET /api/health` - Health check
 
+### Unified Service Controller (merged from aws-service-controller)
+
+- `GET /api/services` — List configured applications (from `servicesMap.json`)
+- `GET /api/services/:appName` — Get all services for an application
+- `GET /api/services/:appName/:serviceType` — Get configured resources for a service
+- `GET /api/services/:appName/:serviceType/status` — Get live status for resources
+- `POST /api/services/:appName/:serviceType/start` — Start resource (EC2/RDS) or invoke (Lambda)
+- `POST /api/services/:appName/:serviceType/stop` — Stop resource (EC2/RDS)
+- `POST /api/services/:appName/sqs/:queueName/enable` — Enable SQS queue (test message)
+- `POST /api/services/:appName/sqs/:queueName/disable` — Disable SQS queue (purge)
+- `POST /api/services/:appName/lambda/:functionName/enable-concurrency` — Enable provisioned concurrency
+- `POST /api/services/:appName/lambda/:functionName/disable-concurrency` — Disable provisioned concurrency
+- `GET /api/services/:appName/lambda/:functionName/concurrency-status` — Provisioned concurrency status
+
+Frontend adds a new "Service Controller" tab that surfaces these operations without altering existing pages.
+
 ## Security Features
 
 - **Credential Management**: Secure handling of AWS credentials

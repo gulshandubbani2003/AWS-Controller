@@ -1,0 +1,26 @@
+@'
+node_modules/
+dist/
+build/
+.coverage/
+.DS_Store
+Thumbs.db
+.env
+.env.*
+*.log
+*.tmp
+.vscode/
+.idea/
+venv/
+**/__pycache__/
+*.pyc
+*.pyo
+pip-wheel-metadata/
+.cache/
+.parcel-cache/
+.svelte-kit/
+.next/
+out/
+# Vite/Tailwind typical outputs (keep if you actually want to commit)
+*.local
+'@ | Out-File -Encoding utf8 ".gitignore"
