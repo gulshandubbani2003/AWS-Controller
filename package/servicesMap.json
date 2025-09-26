@@ -1,0 +1,60 @@
+{
+  "Postgres-Listeners": {
+    "ec2": [
+      "debezium:i-0d3732ee47f79bb7a",
+      "tusta-websocket-instance:i-0070fceed94aa31ea"
+    ]
+  },
+  "Backend-Node": {
+    "ec2": [
+      "Tusta-Backend-Node-pm2:i-061eface4e27e863d"
+    ]
+  },
+  "Redis": {
+    "ec2": [
+      "Sentinal:i-040806eca43cd51b0",
+      "Redis:i-06d6f1a57a49cfc59",
+      "Redis(duplicate):i-0c9ba0a2e67437f70"
+    ]
+  },
+  "Position monitoring": {
+    "ec2": [
+      "Tusta-POSITION-MONITERING:i-093559d3be46dee67"
+    ]
+  },
+  "LTP": {
+    "ec2": [
+      "tusta-ltp-ec2:i-088421d59ef44c100"
+    ]
+  },
+  "Order Execution": {
+    "ec2": [
+      "order-execution:i-0262b476b1f747cdc"
+    ],
+    "lambda": [
+      "tusta-order-preprocess-lambda",
+      "tusta-order-execution-service"
+    ],
+    "sqs": [
+      "orderPreprocessQueue",
+      "OrderQueue"
+    ]
+  },
+  "Backtest Lambda": {
+    "lambda": [
+      "backtesting-lambda"
+    ],
+    "sqs": [
+      "backtesting-queue"
+    ]
+  },
+  "AI Prompt": {
+    "lambda": [
+      "tusta-prompt-lambda"
+    ],
+    "sqs": [
+      "tusta-prompt-queue"
+    ]
+  }
+}
+
