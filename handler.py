@@ -1,0 +1,8 @@
+import awsgi
+from one import app
+
+
+def handler(event, context):
+    return awsgi.response(app, event, context)
+
+
