@@ -56,6 +56,7 @@ const AWSManagementDashboard = () => {
     cloudwatch_alarms: {}
   });
   const [refreshing, setRefreshing] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
 
 	// Controller state
 	const [controllerApps, setControllerApps] = useState([]);
@@ -64,6 +65,10 @@ const AWSManagementDashboard = () => {
 	const [selectedServiceType, setSelectedServiceType] = useState('ec2');
 	const [controllerResources, setControllerResources] = useState([]);
 	const [lambdaConcurrency, setLambdaConcurrency] = useState({});
+	// UI action states for -ing/-ed feedback
+	const [ec2ActionState, setEc2ActionState] = useState({}); // { [instanceId]: 'starting'|'started'|'stopping'|'stopped' }
+	const [lambdaActionState, setLambdaActionState] = useState({}); // { [fn]: { invoke, enable, disable } }
+	const [sqsActionState, setSqsActionState] = useState({}); // { [queue]: { status, enable, disable } }
 
   const fetchAllResources = async () => {
     try {
@@ -137,11 +142,11 @@ const AWSManagementDashboard = () => {
     try {
       setControllerLoading(true);
       if (type === 'sqs') {
-        const res = await fetch(`${API_BASE_URL}/sqs`);
+        const res = await fetch(`${API_BASE_URL}/sqs/details`);
         if (res.ok) {
           const data = await res.json();
-          const resources = (data.queues || []).map(q => ({ resourceId: q }));
-          setControllerResources(resources);
+          const details = (data.queues || []).map(q => ({ resourceId: q.name, attributes: q.attributes }));
+          setControllerResources(details);
         } else {
           setControllerResources([]);
         }
@@ -177,8 +182,9 @@ const AWSManagementDashboard = () => {
   const startResource = async (resourceId) => {
 		try {
 			setControllerLoading(true);
-			const url = selectedServiceType === 'ec2' ? `${API_BASE_URL}/ec2/start` : selectedServiceType === 'lambda' ? `${API_BASE_URL}/lambda/invoke` : `${API_BASE_URL}/services/${encodeURIComponent(selectedApp)}/${encodeURIComponent(selectedServiceType)}/start`;
-			const body = selectedServiceType === 'ec2' ? { instanceId: resourceId } : selectedServiceType === 'lambda' ? { functionName: resourceId } : { resourceId };
+			setEc2ActionState(prev => ({ ...prev, [resourceId]: 'starting' }));
+			const url = `${API_BASE_URL}/ec2/start`;
+			const body = { instanceId: resourceId };
 			const res = await fetch(url, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -187,10 +193,14 @@ const AWSManagementDashboard = () => {
 			if (!res.ok) {
 				const err = await res.json().catch(() => ({}));
 				alert(`Failed to start: ${err.error || res.status}`);
+				setEc2ActionState(prev => ({ ...prev, [resourceId]: undefined }));
+			} else {
+				setEc2ActionState(prev => ({ ...prev, [resourceId]: 'started' }));
+				setTimeout(() => setEc2ActionState(prev => ({ ...prev, [resourceId]: undefined })), 1200);
 			}
-			await fetchControllerStatus();
 		} catch (e) {
 			console.error('Error starting resource:', e);
+			setEc2ActionState(prev => ({ ...prev, [resourceId]: undefined }));
 		} finally {
 			setControllerLoading(false);
 		}
@@ -199,8 +209,9 @@ const AWSManagementDashboard = () => {
   const stopResource = async (resourceId) => {
 		try {
 			setControllerLoading(true);
-			const url = selectedServiceType === 'ec2' ? `${API_BASE_URL}/ec2/stop` : `${API_BASE_URL}/services/${encodeURIComponent(selectedApp)}/${encodeURIComponent(selectedServiceType)}/stop`;
-			const body = selectedServiceType === 'ec2' ? { instanceId: resourceId } : { resourceId };
+			setEc2ActionState(prev => ({ ...prev, [resourceId]: 'stopping' }));
+			const url = `${API_BASE_URL}/ec2/stop`;
+			const body = { instanceId: resourceId };
 			const res = await fetch(url, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -209,42 +220,58 @@ const AWSManagementDashboard = () => {
 			if (!res.ok) {
 				const err = await res.json().catch(() => ({}));
 				alert(`Failed to stop: ${err.error || res.status}`);
+				setEc2ActionState(prev => ({ ...prev, [resourceId]: undefined }));
+			} else {
+				setEc2ActionState(prev => ({ ...prev, [resourceId]: 'stopped' }));
+				setTimeout(() => setEc2ActionState(prev => ({ ...prev, [resourceId]: undefined })), 1200);
 			}
-			await fetchControllerStatus();
 		} catch (e) {
 			console.error('Error stopping resource:', e);
+			setEc2ActionState(prev => ({ ...prev, [resourceId]: undefined }));
 		} finally {
 			setControllerLoading(false);
 		}
 	};
 
-	const enableQueue = async (queueName) => {
+const enableQueue = async (queueName) => {
 		try {
 			setControllerLoading(true);
+			setSqsActionState(prev => ({ ...prev, [queueName]: { ...(prev[queueName]||{}), enable: 'enabling' } }));
       const res = await fetch(`${API_BASE_URL}/sqs/enable/${encodeURIComponent(queueName)}`, { method: 'POST' });
 			if (!res.ok) {
 				const err = await res.json().catch(() => ({}));
 				alert(`Failed to enable queue: ${err.error || res.status}`);
+				setSqsActionState(prev => ({ ...prev, [queueName]: { ...(prev[queueName]||{}), enable: undefined } }));
+			} else {
+				setSqsActionState(prev => ({ ...prev, [queueName]: { ...(prev[queueName]||{}), enable: 'enabled' } }));
+				setTimeout(() => setSqsActionState(prev => ({ ...prev, [queueName]: { ...(prev[queueName]||{}), enable: undefined } })), 1200);
 			}
       await fetchControllerStatus('', 'sqs');
 		} catch (e) {
 			console.error('Error enabling queue:', e);
+			setSqsActionState(prev => ({ ...prev, [queueName]: { ...(prev[queueName]||{}), enable: undefined } }));
 		} finally {
 			setControllerLoading(false);
 		}
 	};
 
-	const disableQueue = async (queueName) => {
+const disableQueue = async (queueName) => {
 		try {
 			setControllerLoading(true);
+			setSqsActionState(prev => ({ ...prev, [queueName]: { ...(prev[queueName]||{}), disable: 'disabling' } }));
       const res = await fetch(`${API_BASE_URL}/sqs/disable/${encodeURIComponent(queueName)}`, { method: 'POST' });
 			if (!res.ok) {
 				const err = await res.json().catch(() => ({}));
 				alert(`Failed to disable queue: ${err.error || res.status}`);
+				setSqsActionState(prev => ({ ...prev, [queueName]: { ...(prev[queueName]||{}), disable: undefined } }));
+			} else {
+				setSqsActionState(prev => ({ ...prev, [queueName]: { ...(prev[queueName]||{}), disable: 'disabled' } }));
+				setTimeout(() => setSqsActionState(prev => ({ ...prev, [queueName]: { ...(prev[queueName]||{}), disable: undefined } })), 1200);
 			}
       await fetchControllerStatus('', 'sqs');
 		} catch (e) {
 			console.error('Error disabling queue:', e);
+			setSqsActionState(prev => ({ ...prev, [queueName]: { ...(prev[queueName]||{}), disable: undefined } }));
 		} finally {
 			setControllerLoading(false);
 		}
@@ -253,6 +280,7 @@ const AWSManagementDashboard = () => {
   const invokeLambda = async (functionName) => {
     try {
       setControllerLoading(true);
+      setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), invoke: 'invoking' } }));
       const res = await fetch(`${API_BASE_URL}/lambda/invoke`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -261,13 +289,15 @@ const AWSManagementDashboard = () => {
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         alert(`Failed to invoke: ${err.error || res.status}`);
+        setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), invoke: undefined } }));
         return;
       }
       await res.json();
-      alert('Invocation sent.');
+      setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), invoke: 'invoked' } }));
+      setTimeout(() => setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), invoke: undefined } })), 1200);
     } catch (e) {
       console.error('Error invoking lambda:', e);
-      alert('Invocation failed');
+      setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), invoke: undefined } }));
     } finally {
       setControllerLoading(false);
     }
@@ -276,7 +306,8 @@ const AWSManagementDashboard = () => {
 	const enableLambdaConcurrency = async (functionName, concurrentExecutions = 1) => {
 		try {
 			setControllerLoading(true);
-			const res = await fetch(`${API_BASE_URL}/services/${encodeURIComponent(selectedApp)}/lambda/${encodeURIComponent(functionName)}/enable-concurrency`, {
+      setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), enable: 'enabling' } }));
+      const res = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(functionName)}/enable-concurrency`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ concurrentExecutions })
@@ -284,10 +315,14 @@ const AWSManagementDashboard = () => {
 			if (!res.ok) {
 				const err = await res.json().catch(() => ({}));
 				alert(`Failed to enable concurrency: ${err.error || res.status}`);
+				setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), enable: undefined } }));
+			} else {
+				setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), enable: 'enabled' } }));
+				setTimeout(() => setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), enable: undefined } })), 1200);
 			}
-			await fetchControllerStatus(selectedApp, 'lambda');
 		} catch (e) {
 			console.error('Error enabling provisioned concurrency:', e);
+			setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), enable: undefined } }));
 		} finally {
 			setControllerLoading(false);
 		}
@@ -296,14 +331,19 @@ const AWSManagementDashboard = () => {
 	const disableLambdaConcurrency = async (functionName) => {
 		try {
 			setControllerLoading(true);
-			const res = await fetch(`${API_BASE_URL}/services/${encodeURIComponent(selectedApp)}/lambda/${encodeURIComponent(functionName)}/disable-concurrency`, { method: 'POST' });
+      setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), disable: 'disabling' } }));
+      const res = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(functionName)}/disable-concurrency`, { method: 'POST' });
 			if (!res.ok) {
 				const err = await res.json().catch(() => ({}));
 				alert(`Failed to disable concurrency: ${err.error || res.status}`);
+				setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), disable: undefined } }));
+			} else {
+				setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), disable: 'disabled' } }));
+				setTimeout(() => setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), disable: undefined } })), 1200);
 			}
-			await fetchControllerStatus(selectedApp, 'lambda');
 		} catch (e) {
 			console.error('Error disabling provisioned concurrency:', e);
+			setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), disable: undefined } }));
 		} finally {
 			setControllerLoading(false);
 		}
@@ -324,6 +364,14 @@ const AWSManagementDashboard = () => {
 		}
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [selectedApp, selectedServiceType]);
+
+	// Load SQS details when switching to SQS tab
+	useEffect(() => {
+		if (isConnected && activeTab === 'sqs') {
+			fetchControllerStatus('', 'sqs');
+		}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [activeTab, isConnected]);
 
   const getStatusColor = (status) => {
     switch (status?.toLowerCase()) {
@@ -629,11 +677,18 @@ const AWSManagementDashboard = () => {
 
         {activeTab === 'ec2' && (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-            <div className="px-6 py-4 border-b border-gray-200">
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900 flex items-center">
                 <Server className="h-5 w-5 mr-2" />
                 EC2 Instances ({awsData.ec2?.length || 0})
               </h2>
+              <input
+                type="text"
+                value={activeTab==='ec2'?searchQuery:''}
+                onChange={(e)=> setSearchQuery(e.target.value)}
+                placeholder="Search instances..."
+                className="w-full md:w-72 px-4 py-2 rounded-full border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              />
             </div>
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200">
@@ -648,7 +703,11 @@ const AWSManagementDashboard = () => {
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {awsData.ec2?.map((instance) => (
+                  {(awsData.ec2||[]).filter((i)=>{
+                    const q = searchQuery.toLowerCase();
+                    if (!q) return true;
+                    return (i.name||'').toLowerCase().includes(q) || (i.instance_id||'').toLowerCase().includes(q) || (i.instance_type||'').toLowerCase().includes(q);
+                  }).map((instance) => (
                     <tr key={instance.instance_id} className="hover:bg-gray-50">
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div>
@@ -674,9 +733,13 @@ const AWSManagementDashboard = () => {
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm">
-                        <div className="flex space-x-2">
-                          <button onClick={() => startResource(instance.instance_id)} className="px-3 py-1 rounded bg-green-600 hover:bg-green-700 text-white">Start</button>
-                          <button onClick={() => stopResource(instance.instance_id)} className="px-3 py-1 rounded bg-yellow-600 hover:bg-yellow-700 text-white">Stop</button>
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => startResource(instance.instance_id)} className="px-3 py-1.5 rounded-full bg-green-600 hover:bg-green-700 text-white text-xs font-semibold shadow-sm">
+                            {ec2ActionState[instance.instance_id] === 'starting' ? 'Starting' : ec2ActionState[instance.instance_id] === 'started' ? 'Started' : 'Start'}
+                          </button>
+                          <button onClick={() => stopResource(instance.instance_id)} className="px-3 py-1.5 rounded-full bg-red-600 hover:bg-red-700 text-white text-xs font-semibold shadow-sm">
+                            {ec2ActionState[instance.instance_id] === 'stopping' ? 'Stopping' : ec2ActionState[instance.instance_id] === 'stopped' ? 'Stopped' : 'Stop'}
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -689,15 +752,25 @@ const AWSManagementDashboard = () => {
 
         {activeTab === 'rds' && (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-            <div className="px-6 py-4 border-b border-gray-200">
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900 flex items-center">
                 <Database className="h-5 w-5 mr-2" />
                 RDS Instances ({awsData.rds?.length || 0})
               </h2>
+              <input
+                type="text"
+                value={activeTab==='rds'?searchQuery:''}
+                onChange={(e)=> setSearchQuery(e.target.value)}
+                placeholder="Search RDS..."
+                className="w-full md:w-72 px-4 py-2 rounded-full border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              />
             </div>
             <div className="p-6">
               <div className="grid gap-6">
-                {awsData.rds?.map((db) => (
+                {(awsData.rds||[]).filter((db)=>{
+                  const q = searchQuery.toLowerCase();
+                  if (!q) return true; return (db.name||'').toLowerCase().includes(q) || (db.engine||'').toLowerCase().includes(q);
+                }).map((db) => (
                   <div key={db.name} className="border border-gray-200 rounded-lg p-6 hover:shadow-md transition-shadow">
                     <div className="flex items-center justify-between mb-4">
                       <div>
@@ -737,50 +810,60 @@ const AWSManagementDashboard = () => {
 
         {activeTab === 'lambda' && (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-            <div className="px-6 py-4 border-b border-gray-200">
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900 flex items-center">
                 <Zap className="h-5 w-5 mr-2" />
                 Lambda Functions ({awsData.lambda?.length || 0})
               </h2>
+              <input
+                type="text"
+                value={activeTab==='lambda'?searchQuery:''}
+                onChange={(e)=> setSearchQuery(e.target.value)}
+                placeholder="Search Lambda..."
+                className="w-full md:w-72 px-4 py-2 rounded-full border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              />
             </div>
             <div className="p-6">
-              <div className="grid gap-4">
-                {awsData.lambda?.map((func) => (
-                  <div key={func.name} className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50">
-                    <div className="flex items-center justify-between mb-3">
-                      <div>
-                        <h3 className="font-semibold text-gray-900">{func.name}</h3>
-                        <p className="text-sm text-gray-500">{func.runtime}</p>
-                      </div>
-                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getStatusColor(func.state)}`}>
-                        {func.state}
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                      <div>
-                        <p className="text-gray-500">Memory</p>
-                        <p className="font-medium">{func.memory_size} MB</p>
-                      </div>
-                      <div>
-                        <p className="text-gray-500">Timeout</p>
-                        <p className="font-medium">{func.timeout}s</p>
-                      </div>
-                      <div>
-                        <p className="text-gray-500">Code Size</p>
-                        <p className="font-medium">{(func.code_size / 1024 / 1024).toFixed(2)} MB</p>
-                      </div>
-                      <div>
-                        <p className="text-gray-500">Last Modified</p>
-                        <p className="font-medium">{new Date(func.last_modified).toLocaleDateString()}</p>
-                      </div>
-                    </div>
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      <button onClick={() => invokeLambda(func.name)} className="px-3 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white">Invoke</button>
-                      <button onClick={() => enableLambdaConcurrency(func.name, 1)} className="px-3 py-1 rounded bg-green-600 hover:bg-green-700 text-white">Enable Concurrency</button>
-                      <button onClick={() => disableLambdaConcurrency(func.name)} className="px-3 py-1 rounded bg-red-600 hover:bg-red-700 text-white">Disable Concurrency</button>
-                    </div>
-                  </div>
-                ))}
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Function name</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Package type</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Runtime</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last modified</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {(awsData.lambda||[]).filter((f)=>{
+                      const q = searchQuery.toLowerCase();
+                      if (!q) return true; return (f.name||'').toLowerCase().includes(q) || (f.runtime||'').toLowerCase().includes(q);
+                    }).map((func) => (
+                      <tr key={func.name} className="hover:bg-gray-50">
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <div className="text-sm font-medium text-gray-900">{func.name}</div>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{func.package_type || (func.runtime ? 'Zip' : 'Image')}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{func.runtime || '-'}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{func.last_modified ? new Date(func.last_modified).toLocaleDateString() : '-'}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                          <div className="flex items-center gap-2">
+                            <button onClick={() => invokeLambda(func.name)} className="px-3 py-1.5 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-sm">
+                              {lambdaActionState[func.name]?.invoke === 'invoking' ? 'Invoking' : lambdaActionState[func.name]?.invoke === 'invoked' ? 'Invoked' : 'Invoke'}
+                            </button>
+                            <button onClick={() => enableLambdaConcurrency(func.name, 1)} className="px-3 py-1.5 rounded-full bg-green-600 hover:bg-green-700 text-white text-xs font-semibold shadow-sm">
+                              {lambdaActionState[func.name]?.enable === 'enabling' ? 'Enabling' : lambdaActionState[func.name]?.enable === 'enabled' ? 'Enabled' : 'Enable Concurrency'}
+                            </button>
+                            <button onClick={() => disableLambdaConcurrency(func.name)} className="px-3 py-1.5 rounded-full bg-red-600 hover:bg-red-700 text-white text-xs font-semibold shadow-sm">
+                              {lambdaActionState[func.name]?.disable === 'disabling' ? 'Disabling' : lambdaActionState[func.name]?.disable === 'disabled' ? 'Disabled' : 'Disable Concurrency'}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>
@@ -788,11 +871,18 @@ const AWSManagementDashboard = () => {
 
         {activeTab === 's3' && (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-            <div className="px-6 py-4 border-b border-gray-200">
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900 flex items-center">
                 <HardDrive className="h-5 w-5 mr-2" />
                 S3 Buckets ({awsData.s3?.length || 0})
               </h2>
+              <input
+                type="text"
+                value={activeTab==='s3'?searchQuery:''}
+                onChange={(e)=> setSearchQuery(e.target.value)}
+                placeholder="Search buckets..."
+                className="w-full md:w-72 px-4 py-2 rounded-full border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              />
             </div>
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200">
@@ -806,7 +896,9 @@ const AWSManagementDashboard = () => {
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {awsData.s3?.map((bucket) => (
+                  {(awsData.s3||[]).filter((b)=>{
+                    const q = searchQuery.toLowerCase(); if (!q) return true; return (b.name||'').toLowerCase().includes(q) || (b.region||'').toLowerCase().includes(q);
+                  }).map((bucket) => (
                     <tr key={bucket.name} className="hover:bg-gray-50">
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div className="flex items-center">
@@ -830,44 +922,76 @@ const AWSManagementDashboard = () => {
 
         {activeTab === 'sqs' && (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-            <div className="px-6 py-4 border-b border-gray-200">
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
               <h2 className="text-lg font-semibold text-gray-900 flex items-center">
                 <MemoryStick className="h-5 w-5 mr-2" />
                 SQS Queues
               </h2>
+              <input
+                type="text"
+                value={activeTab==='sqs'?searchQuery:''}
+                onChange={(e)=> setSearchQuery(e.target.value)}
+                placeholder="Search queues..."
+                className="w-full md:w-72 px-4 py-2 rounded-full border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              />
             </div>
             <div className="p-6">
-              <div className="mb-4 flex items-center space-x-2">
-                <button onClick={() => fetchControllerStatus(selectedApp || 'Order Execution', 'sqs')} className="px-3 py-2 rounded bg-gray-100 hover:bg-gray-200 text-sm text-gray-700">Refresh</button>
-              </div>
-              {/* Basic list: status will render inside actions on demand */}
+              {/* Removed inner refresh; global header refresh is sufficient */}
+              {/* Rich table with AWS-like columns */}
               <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-gray-200">
                   <thead className="bg-gray-50">
                     <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Queue</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Messages available</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Messages in flight</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Encryption</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
-                    {(controllerResources || []).map((q) => (
-                      <tr key={q.resourceId} className="hover:bg-gray-50">
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{q.resourceId}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm">
-                          <div className="flex space-x-2">
-                            <button onClick={async () => {
-                              try {
-                                const res = await fetch(`${API_BASE_URL}/sqs/status/${encodeURIComponent(q.resourceId)}`);
-                                const data = await res.json();
-                                alert(`Approx Messages: ${data.ApproximateNumberOfMessages || 0}`);
-                              } catch (e) {}
-                            }} className="px-3 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white">Status</button>
-                            <button onClick={() => enableQueue(q.resourceId)} className="px-3 py-1 rounded bg-green-600 hover:bg-green-700 text-white">Enable</button>
-                            <button onClick={() => disableQueue(q.resourceId)} className="px-3 py-1 rounded bg-red-600 hover:bg-red-700 text-white">Disable</button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                  {(controllerResources || []).filter((q)=>{
+                    const ql = searchQuery.toLowerCase(); if (!ql) return true; return (q.resourceId||'').toLowerCase().includes(ql);
+                  }).map((q) => {
+                      const attrs = q.attributes || {};
+                      const created = attrs.CreatedTimestamp ? new Date(parseInt(attrs.CreatedTimestamp, 10) * 1000) : null;
+                      const modified = attrs.LastModifiedTimestamp ? new Date(parseInt(attrs.LastModifiedTimestamp, 10) * 1000) : null;
+                      const isFifo = (q.resourceId || '').toLowerCase().endsWith('.fifo');
+                      const available = attrs.ApproximateNumberOfMessages ? parseInt(attrs.ApproximateNumberOfMessages, 10) : 0;
+                      const inFlight = attrs.ApproximateNumberOfMessagesNotVisible ? parseInt(attrs.ApproximateNumberOfMessagesNotVisible, 10) : 0;
+                      const encryption = 'Amazon SQS key (SSE-SQS)';
+                      return (
+                        <tr key={q.resourceId} className="hover:bg-gray-50">
+                          <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{q.resourceId}</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{isFifo ? 'FIFO' : 'Standard'}</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{created ? created.toISOString() : '-'}</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{available}</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{inFlight}</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{encryption}</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm">
+                            <div className="flex items-center gap-2">
+                              <button onClick={async () => {
+                                try {
+                                  const res = await fetch(`${API_BASE_URL}/sqs/status/${encodeURIComponent(q.resourceId)}`);
+                                  const data = await res.json();
+                                  alert(`Messages available: ${data.ApproximateNumberOfMessages || 0}\nIn flight: ${data.ApproximateNumberOfMessagesNotVisible || 0}`);
+                                } catch (e) {}
+                              }} className="px-3 py-1.5 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-sm">
+                                {sqsActionState[q.resourceId]?.status === 'checking' ? 'Checking' : 'Status'}
+                              </button>
+                              <button onClick={() => enableQueue(q.resourceId)} className="px-3 py-1.5 rounded-full bg-green-600 hover:bg-green-700 text-white text-xs font-semibold shadow-sm">
+                                {sqsActionState[q.resourceId]?.enable === 'enabling' ? 'Enabling' : sqsActionState[q.resourceId]?.enable === 'enabled' ? 'Enabled' : 'Enable'}
+                              </button>
+                              <button onClick={() => disableQueue(q.resourceId)} className="px-3 py-1.5 rounded-full bg-red-600 hover:bg-red-700 text-white text-xs font-semibold shadow-sm">
+                                {sqsActionState[q.resourceId]?.disable === 'disabling' ? 'Disabling' : sqsActionState[q.resourceId]?.disable === 'disabled' ? 'Disabled' : 'Disable'}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -879,12 +1003,19 @@ const AWSManagementDashboard = () => {
           <div className="space-y-6">
             {/* VPCs */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-              <div className="px-6 py-4 border-b border-gray-200">
-                <h2 className="text-lg font-semibold text-gray-900 flex items-center">
-                  <Network className="h-5 w-5 mr-2" />
-                  VPCs ({awsData.vpc?.length || 0})
-                </h2>
-              </div>
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-gray-900 flex items-center">
+                <Network className="h-5 w-5 mr-2" />
+                VPCs ({awsData.vpc?.length || 0})
+              </h2>
+              <input
+                type="text"
+                value={activeTab==='vpc'?searchQuery:''}
+                onChange={(e)=> setSearchQuery(e.target.value)}
+                placeholder="Search VPCs..."
+                className="w-full md:w-72 px-4 py-2 rounded-full border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              />
+            </div>
               <div className="p-6">
                 <div className="grid gap-4">
                   {awsData.vpc?.map((vpc) => (
@@ -923,12 +1054,19 @@ const AWSManagementDashboard = () => {
 
             {/* Subnets */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-              <div className="px-6 py-4 border-b border-gray-200">
-                <h2 className="text-lg font-semibold text-gray-900 flex items-center">
-                  <Network className="h-5 w-5 mr-2" />
-                  Subnets ({awsData.subnets?.length || 0})
-                </h2>
-              </div>
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-gray-900 flex items-center">
+                <Network className="h-5 w-5 mr-2" />
+                Subnets ({awsData.subnets?.length || 0})
+              </h2>
+              <input
+                type="text"
+                value={activeTab==='vpc'?searchQuery:''}
+                onChange={(e)=> setSearchQuery(e.target.value)}
+                placeholder="Search subnets..."
+                className="w-full md:w-72 px-4 py-2 rounded-full border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              />
+            </div>
               <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-gray-200">
                   <thead className="bg-gray-50">
@@ -963,12 +1101,19 @@ const AWSManagementDashboard = () => {
           <div className="space-y-6">
             {/* IAM Users */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-              <div className="px-6 py-4 border-b border-gray-200">
-                <h2 className="text-lg font-semibold text-gray-900 flex items-center">
-                  <Users className="h-5 w-5 mr-2" />
-                  IAM Users ({awsData.iam_users?.length || 0})
-                </h2>
-              </div>
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-gray-900 flex items-center">
+                <Users className="h-5 w-5 mr-2" />
+                IAM Users ({awsData.iam_users?.length || 0})
+              </h2>
+              <input
+                type="text"
+                value={activeTab==='iam'?searchQuery:''}
+                onChange={(e)=> setSearchQuery(e.target.value)}
+                placeholder="Search users..."
+                className="w-full md:w-72 px-4 py-2 rounded-full border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              />
+            </div>
               <div className="overflow-x-auto">
                 <table className="min-w-full divide-y divide-gray-200">
                   <thead className="bg-gray-50">
@@ -1002,12 +1147,19 @@ const AWSManagementDashboard = () => {
 
             {/* IAM Roles */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-              <div className="px-6 py-4 border-b border-gray-200">
-                <h2 className="text-lg font-semibold text-gray-900 flex items-center">
-                  <Shield className="h-5 w-5 mr-2" />
-                  IAM Roles ({awsData.iam_roles?.length || 0})
-                </h2>
-              </div>
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-gray-900 flex items-center">
+                <Shield className="h-5 w-5 mr-2" />
+                IAM Roles ({awsData.iam_roles?.length || 0})
+              </h2>
+              <input
+                type="text"
+                value={activeTab==='iam'?searchQuery:''}
+                onChange={(e)=> setSearchQuery(e.target.value)}
+                placeholder="Search roles..."
+                className="w-full md:w-72 px-4 py-2 rounded-full border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              />
+            </div>
               <div className="p-6">
                 <div className="grid gap-4">
                   {awsData.iam_roles?.map((role) => (
@@ -1034,12 +1186,19 @@ const AWSManagementDashboard = () => {
           <div className="space-y-6">
             {/* CloudWatch Metrics */}
             <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-              <div className="px-6 py-4 border-b border-gray-200">
-                <h2 className="text-lg font-semibold text-gray-900 flex items-center">
-                  <Activity className="h-5 w-5 mr-2" />
-                  CloudWatch Metrics
-                </h2>
-              </div>
+            <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-gray-900 flex items-center">
+                <Activity className="h-5 w-5 mr-2" />
+                CloudWatch Metrics
+              </h2>
+              <input
+                type="text"
+                value={activeTab==='cloudwatch'?searchQuery:''}
+                onChange={(e)=> setSearchQuery(e.target.value)}
+                placeholder="Search metrics..."
+                className="w-full md:w-72 px-4 py-2 rounded-full border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              />
+            </div>
               <div className="p-6">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                   {/* EC2 CPU Metrics */}

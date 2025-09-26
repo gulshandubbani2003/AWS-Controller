@@ -229,6 +229,7 @@ def list_lambda_functions():
                 'timeout': func.get('Timeout', 0),
                 'memory_size': func.get('MemorySize', 0),
                 'code_size': func.get('CodeSize', 0),
+                'package_type': func.get('PackageType', 'Image' if 'ImageConfig' in func or func.get('PackageType') == 'Image' else 'Zip'),
                 'handler': func.get('Handler', 'N/A'),
                 'role': func.get('Role', 'N/A').split('/')[-1] if func.get('Role') else 'N/A'
             })
@@ -1217,9 +1218,12 @@ def lambda_concurrency_status(functionName: str):
             pce = resp.get('ProvisionedConcurrencyConfig', {}).get('ProvisionedConcurrentExecutions', 0)
             return jsonify({'status': 'enabled', 'version': version, 'provisionedConcurrentExecutions': pce})
         except Exception as inner:
-            if 'ResourceNotFoundException' in str(inner):
+            msg = str(inner)
+            if 'ResourceNotFoundException' in msg:
                 return jsonify({'status': 'disabled'})
-            raise
+            if 'AccessDenied' in msg or 'UnrecognizedClient' in msg or 'InvalidClientTokenId' in msg:
+                return jsonify({'status': 'unknown', 'message': 'AWS credentials or permissions issue'})
+            return jsonify({'status': 'unknown', 'message': msg}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1258,6 +1262,47 @@ def list_sqs():
         for url in resp.get('QueueUrls', []) or []:
             names.append(url.rsplit('/', 1)[-1])
         return jsonify({'queues': names})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/sqs/details', methods=['GET'])
+def list_sqs_with_attributes():
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        prefix = request.args.get('prefix')
+        sqs = baseSession.client('sqs')
+        kwargs = {'QueueNamePrefix': prefix} if prefix else {}
+        resp = sqs.list_queues(**kwargs)
+        urls = resp.get('QueueUrls', []) or []
+        results = []
+
+        # Fetch attributes in parallel for faster response
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def fetch_attrs(qurl: str):
+            try:
+                attrs = sqs.get_queue_attributes(
+                    QueueUrl=qurl,
+                    AttributeNames=[
+                        'ApproximateNumberOfMessages',
+                        'ApproximateNumberOfMessagesNotVisible',
+                        'ApproximateNumberOfMessagesDelayed',
+                        'CreatedTimestamp',
+                        'LastModifiedTimestamp'
+                    ]
+                )['Attributes']
+            except Exception as err:
+                attrs = {'error': str(err)}
+            name = qurl.rsplit('/', 1)[-1]
+            return {'name': name, 'attributes': attrs}
+
+        with ThreadPoolExecutor(max_workers=min(16, max(4, len(urls)))) as ex:
+            futures = [ex.submit(fetch_attrs, u) for u in urls]
+            for fut in as_completed(futures):
+                results.append(fut.result())
+
+        return jsonify({'queues': results})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
