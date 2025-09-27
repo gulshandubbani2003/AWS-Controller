@@ -1210,17 +1210,62 @@ def lambda_concurrency_status(functionName: str):
         return jsonify({'error': 'Not connected to AWS'}), 401
     try:
         lam = baseSession.client('lambda')
-        version = _get_latest_lambda_version(lam, functionName)
-        if not version:
-            return jsonify({'status': 'no_published_version'})
+        # Use list API to find ANY provisioned concurrency config for this function
+        # This avoids false "disabled" when a different version has the config
         try:
-            resp = lam.get_provisioned_concurrency_config(FunctionName=functionName, Qualifier=version)
-            pce = resp.get('ProvisionedConcurrencyConfig', {}).get('ProvisionedConcurrentExecutions', 0)
-            return jsonify({'status': 'enabled', 'version': version, 'provisionedConcurrentExecutions': pce})
+            listed = lam.list_provisioned_concurrency_configs(FunctionName=functionName)
+            configs = listed.get('ProvisionedConcurrencyConfigs', []) or []
+            if not configs:
+                # Fall back to latest version check to provide friendly info
+                version = _get_latest_lambda_version(lam, functionName)
+                if not version:
+                    return jsonify({'status': 'no_published_version'})
+                try:
+                    resp = lam.get_provisioned_concurrency_config(FunctionName=functionName, Qualifier=version)
+                    config = resp.get('ProvisionedConcurrencyConfig', {})
+                    status = (config.get('Status') or 'UNKNOWN')
+                    pce = config.get('ProvisionedConcurrentExecutions', 0)
+                    requested_pce = (config.get('RequestedConfiguration', {}) or {}).get('ProvisionedConcurrentExecutions', 0)
+                    actual_pce = pce if (status or '').upper() == 'READY' else requested_pce
+                    is_enabled = (status or '').upper() not in ['DISABLED', 'FAILED', 'UNKNOWN'] and (requested_pce or pce) > 0
+                    return jsonify({
+                        'status': 'enabled' if is_enabled else 'disabled',
+                        'version': version,
+                        'provisionedConcurrentExecutions': actual_pce,
+                        'aws_status': status
+                    })
+                except Exception as inner2:
+                    msg2 = str(inner2)
+                    if 'ResourceNotFoundException' in msg2:
+                        return jsonify({'status': 'disabled'})
+                    if 'AccessDenied' in msg2 or 'UnrecognizedClient' in msg2 or 'InvalidClientTokenId' in msg2:
+                        return jsonify({'status': 'unknown', 'message': 'AWS credentials or permissions issue'})
+                    return jsonify({'status': 'unknown', 'message': msg2}), 200
+
+            # Choose the config with the most recent LastModified or highest requested
+            best = max(
+                configs,
+                key=lambda c: (
+                    (c.get('LastModified') or ''),
+                    (c.get('RequestedProvisionedConcurrentExecutions') or 0)
+                )
+            )
+            status = (best.get('Status') or 'UNKNOWN')
+            requested = best.get('RequestedProvisionedConcurrentExecutions') or 0
+            allocated = best.get('AllocatedProvisionedConcurrentExecutions') or 0
+            qualifier = best.get('Qualifier')
+            actual_pce = allocated if (status or '').upper() == 'READY' else requested
+            is_enabled = (status or '').upper() not in ['DISABLED', 'FAILED', 'UNKNOWN'] and (requested or allocated) > 0
+            return jsonify({
+                'status': 'enabled' if is_enabled else 'disabled',
+                'qualifier': qualifier,
+                'provisionedConcurrentExecutions': actual_pce,
+                'aws_status': status,
+                'requested': requested,
+                'allocated': allocated
+            })
         except Exception as inner:
             msg = str(inner)
-            if 'ResourceNotFoundException' in msg:
-                return jsonify({'status': 'disabled'})
             if 'AccessDenied' in msg or 'UnrecognizedClient' in msg or 'InvalidClientTokenId' in msg:
                 return jsonify({'status': 'unknown', 'message': 'AWS credentials or permissions issue'})
             return jsonify({'status': 'unknown', 'message': msg}), 200

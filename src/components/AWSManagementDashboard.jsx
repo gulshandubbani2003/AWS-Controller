@@ -30,7 +30,7 @@ import {
   MapPin
 } from 'lucide-react';
 
-const API_BASE_URL = import.meta?.env?.VITE_API_BASE_URL || 'http://localhost:5001/api';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001/api';
 
 const AWSManagementDashboard = () => {
   const [credentials, setCredentials] = useState({ 
@@ -319,6 +319,26 @@ const disableQueue = async (queueName) => {
 			} else {
 				setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), enable: 'enabled' } }));
 				setTimeout(() => setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), enable: undefined } })), 1200);
+				
+				// Auto-refresh status after 3 seconds to show updated concurrency
+				setTimeout(async () => {
+					try {
+						const statusRes = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(functionName)}/concurrency-status`);
+						if (statusRes.ok) {
+							const statusData = await statusRes.json();
+							setLambdaActionState(prev => ({
+								...prev,
+								[functionName]: {
+									...prev[functionName],
+									status: statusData?.status || 'unknown',
+									current: typeof statusData?.provisionedConcurrentExecutions === 'number' ? statusData.provisionedConcurrentExecutions : undefined
+								}
+							}));
+						}
+					} catch (e) {
+						console.error('Error refreshing concurrency status:', e);
+					}
+				}, 3000);
 			}
 		} catch (e) {
 			console.error('Error enabling provisioned concurrency:', e);
@@ -340,6 +360,26 @@ const disableQueue = async (queueName) => {
 			} else {
 				setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), disable: 'disabled' } }));
 				setTimeout(() => setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), disable: undefined } })), 1200);
+				
+				// Auto-refresh status after 2 seconds to show updated concurrency
+				setTimeout(async () => {
+					try {
+						const statusRes = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(functionName)}/concurrency-status`);
+						if (statusRes.ok) {
+							const statusData = await statusRes.json();
+							setLambdaActionState(prev => ({
+								...prev,
+								[functionName]: {
+									...prev[functionName],
+									status: statusData?.status || 'unknown',
+									current: typeof statusData?.provisionedConcurrentExecutions === 'number' ? statusData.provisionedConcurrentExecutions : undefined
+								}
+							}));
+						}
+					} catch (e) {
+						console.error('Error refreshing concurrency status:', e);
+					}
+				}, 2000);
 			}
 		} catch (e) {
 			console.error('Error disabling provisioned concurrency:', e);
@@ -366,12 +406,47 @@ const disableQueue = async (queueName) => {
 	}, [selectedApp, selectedServiceType]);
 
 	// Load SQS details when switching to SQS tab
-	useEffect(() => {
-		if (isConnected && activeTab === 'sqs') {
-			fetchControllerStatus('', 'sqs');
-		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [activeTab, isConnected]);
+useEffect(() => {
+    if (isConnected && activeTab === 'sqs') {
+        fetchControllerStatus('', 'sqs');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [activeTab, isConnected]);
+
+// Auto-load Lambda concurrency status/current for table columns
+useEffect(() => {
+    const loadAllLambdaConcurrency = async () => {
+        try {
+            const names = (awsData.lambda || []).map(f => f.name).filter(Boolean);
+            if (names.length === 0) return;
+            const entries = await Promise.all(names.map(async (name) => {
+                try {
+                    const res = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(name)}/concurrency-status`);
+                    if (!res.ok) return [name, { status: 'unknown' }];
+                    const data = await res.json();
+                    return [name, {
+                        status: data?.status || 'unknown',
+                        current: (typeof data?.provisionedConcurrentExecutions === 'number') ? data.provisionedConcurrentExecutions : undefined
+                    }];
+                } catch {
+                    return [name, { status: 'unknown' }];
+                }
+            }));
+            setLambdaActionState(prev => {
+                const next = { ...prev };
+                for (const [name, info] of entries) {
+                    next[name] = { ...(next[name] || {}), ...info };
+                }
+                return next;
+            });
+        } catch (e) {
+            console.error('Error loading lambda concurrency:', e);
+        }
+    };
+    if (isConnected && activeTab === 'lambda') {
+        loadAllLambdaConcurrency();
+    }
+}, [isConnected, activeTab, awsData.lambda]);
 
   const getStatusColor = (status) => {
     switch (status?.toLowerCase()) {
@@ -461,6 +536,42 @@ const disableQueue = async (queueName) => {
       setLambdaActionState(prev => ({
         ...prev,
         [functionName]: { ...(prev[functionName] || {}), current: undefined }
+      }));
+    } finally {
+      setControllerLoading(false);
+    }
+  };
+
+  // Manual refresh function for Lambda concurrency status
+  const refreshLambdaStatus = async (functionName) => {
+    try {
+      setControllerLoading(true);
+      setLambdaActionState(prev => ({
+        ...prev,
+        [functionName]: { ...(prev[functionName] || {}), status: 'checking', current: 'fetching' }
+      }));
+      const res = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(functionName)}/concurrency-status`);
+      if (!res.ok) {
+        setLambdaActionState(prev => ({
+          ...prev,
+          [functionName]: { ...(prev[functionName] || {}), status: 'unknown', current: undefined }
+        }));
+        return;
+      }
+      const data = await res.json();
+      setLambdaActionState(prev => ({
+        ...prev,
+        [functionName]: {
+          ...prev[functionName],
+          status: data?.status || 'unknown',
+          current: typeof data?.provisionedConcurrentExecutions === 'number' ? data.provisionedConcurrentExecutions : undefined
+        }
+      }));
+    } catch (e) {
+      console.error('Error refreshing lambda status:', e);
+      setLambdaActionState(prev => ({
+        ...prev,
+        [functionName]: { ...(prev[functionName] || {}), status: 'unknown', current: undefined }
       }));
     } finally {
       setControllerLoading(false);
@@ -909,6 +1020,8 @@ const disableQueue = async (queueName) => {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Package type</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Runtime</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last modified</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Current Concurrency</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                     </tr>
                   </thead>
@@ -925,23 +1038,15 @@ const disableQueue = async (queueName) => {
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{func.runtime || '-'}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{func.last_modified ? new Date(func.last_modified).toLocaleDateString() : '-'}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm">
+                          <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${lambdaActionState[func.name]?.status === 'enabled' ? 'bg-green-100 text-green-700' : lambdaActionState[func.name]?.status === 'disabled' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700'}`}>
+                            {lambdaActionState[func.name]?.status ? (lambdaActionState[func.name]?.status[0].toUpperCase() + lambdaActionState[func.name]?.status.slice(1)) : 'Unknown'}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
+                          {typeof lambdaActionState[func.name]?.current === 'number' ? lambdaActionState[func.name]?.current : '-'}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm">
                           <div className="flex items-center gap-2">
-                            <button onClick={() => checkLambdaConcurrencyStatus(func.name)} className="px-3 py-1.5 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-sm">
-                              {lambdaActionState[func.name]?.status === 'checking'
-                                ? 'Checking'
-                                : lambdaActionState[func.name]?.status === 'enabled'
-                                ? 'Enabled'
-                                : lambdaActionState[func.name]?.status === 'disabled'
-                                ? 'Disabled'
-                                : 'Status'}
-                            </button>
-                            <button onClick={() => fetchLambdaCurrentConcurrency(func.name)} className="px-3 py-1.5 rounded-full bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold shadow-sm">
-                              {lambdaActionState[func.name]?.current === 'fetching'
-                                ? 'Fetching'
-                                : typeof lambdaActionState[func.name]?.current === 'number'
-                                ? `Current: ${lambdaActionState[func.name]?.current}`
-                                : 'Current Concurrency'}
-                            </button>
                             <button onClick={() => invokeLambda(func.name)} className="px-3 py-1.5 rounded-full bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-sm">
                               {lambdaActionState[func.name]?.invoke === 'invoking' ? 'Invoking' : lambdaActionState[func.name]?.invoke === 'invoked' ? 'Invoked' : 'Invoke'}
                             </button>
@@ -950,6 +1055,9 @@ const disableQueue = async (queueName) => {
                             </button>
                             <button onClick={() => disableLambdaConcurrency(func.name)} className="px-3 py-1.5 rounded-full bg-red-600 hover:bg-red-700 text-white text-xs font-semibold shadow-sm">
                               {lambdaActionState[func.name]?.disable === 'disabling' ? 'Disabling' : lambdaActionState[func.name]?.disable === 'disabled' ? 'Disabled' : 'Disable Concurrency'}
+                            </button>
+                            <button onClick={() => refreshLambdaStatus(func.name)} className="px-3 py-1.5 rounded-full bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold shadow-sm">
+                              {lambdaActionState[func.name]?.status === 'checking' ? 'Refreshing' : 'Refresh Status'}
                             </button>
                           </div>
                         </td>
