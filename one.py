@@ -27,7 +27,7 @@ def cors_preflight():
         resp.headers['Access-Control-Allow-Origin'] = allow_origin
         resp.headers['Vary'] = 'Origin'
         resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-        resp.headers['Access-Control-Allow-Headers'] = request.headers.get('Access-Control-Request-Headers', 'Content-Type, Authorization, X-Aws-Access-Key, X-Aws-Secret-Key, X-Aws-Region')
+        resp.headers['Access-Control-Allow-Headers'] = request.headers.get('Access-Control-Request-Headers', 'Content-Type, Authorization')
         return resp
 
 @app.after_request
@@ -38,29 +38,12 @@ def add_cors_headers(response):
         response.headers['Access-Control-Allow-Origin'] = allow_origin
         response.headers['Vary'] = 'Origin'
         response.headers.setdefault('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-        response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Aws-Access-Key, X-Aws-Secret-Key, X-Aws-Region')
+        response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization')
     else:
         response.headers['Access-Control-Allow-Origin'] = '*'
         response.headers.setdefault('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-        response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Aws-Access-Key, X-Aws-Secret-Key, X-Aws-Region')
+        response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization')
     return response
-
-# Create AWS session from headers when running stateless on Lambda
-def _session_from_request():
-    try:
-        access_key = request.headers.get('X-Aws-Access-Key')
-        secret_key = request.headers.get('X-Aws-Secret-Key')
-        region = request.headers.get('X-Aws-Region') or 'ap-south-1'
-        if access_key and secret_key:
-            import boto3
-            return boto3.Session(
-                aws_access_key_id=access_key,
-                aws_secret_access_key=secret_key,
-                region_name=region
-            )
-    except Exception:
-        pass
-    return None
 
 # Global variables for AWS session
 baseSession = None
@@ -1225,13 +1208,12 @@ def ec2_stop_instances():
 
 @app.route('/api/lambda/<functionName>/enable-concurrency', methods=['POST'])
 def lambda_enable_concurrency(functionName: str):
-    session = baseSession or _session_from_request()
-    if not session:
+    if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     data = request.json or {}
     concurrent = int(data.get('concurrentExecutions', 1))
     try:
-        lam = session.client('lambda')
+        lam = baseSession.client('lambda')
         version = _get_latest_lambda_version(lam, functionName)
         if not version:
             return jsonify({'error': 'No published version found for this function'}), 400
@@ -1242,11 +1224,10 @@ def lambda_enable_concurrency(functionName: str):
 
 @app.route('/api/lambda/<functionName>/disable-concurrency', methods=['POST'])
 def lambda_disable_concurrency(functionName: str):
-    session = baseSession or _session_from_request()
-    if not session:
+    if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     try:
-        lam = session.client('lambda')
+        lam = baseSession.client('lambda')
         version = _get_latest_lambda_version(lam, functionName)
         if not version:
             return jsonify({'error': 'No published version found for this function'}), 400
@@ -1257,11 +1238,10 @@ def lambda_disable_concurrency(functionName: str):
 
 @app.route('/api/lambda/<functionName>/concurrency-status', methods=['GET'])
 def lambda_concurrency_status(functionName: str):
-    session = baseSession or _session_from_request()
-    if not session:
+    if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     try:
-        lam = session.client('lambda')
+        lam = baseSession.client('lambda')
         # Use list API to find ANY provisioned concurrency config for this function
         # This avoids false "disabled" when a different version has the config
         try:
@@ -1320,10 +1300,6 @@ def lambda_concurrency_status(functionName: str):
             msg = str(inner)
             if 'AccessDenied' in msg or 'UnrecognizedClient' in msg or 'InvalidClientTokenId' in msg:
                 return jsonify({'status': 'unknown', 'message': 'AWS credentials or permissions issue'})
-            if 'ResourceNotFoundException' in msg:
-                return jsonify({'status': 'disabled'})
-            if 'ThrottlingException' in msg or 'ServiceUnavailable' in msg:
-                return jsonify({'status': 'unknown', 'message': 'AWS service temporarily unavailable'})
             return jsonify({'status': 'unknown', 'message': msg}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500

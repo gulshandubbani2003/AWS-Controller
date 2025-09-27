@@ -309,12 +309,7 @@ const disableQueue = async (queueName) => {
       setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), enable: 'enabling' } }));
       const res = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(functionName)}/enable-concurrency`, {
 				method: 'POST',
-				headers: credentials?.accessKey && credentials?.secretKey ? {
-            'Content-Type': 'application/json',
-            'X-Aws-Access-Key': credentials.accessKey,
-            'X-Aws-Secret-Key': credentials.secretKey,
-            'X-Aws-Region': credentials.region || 'ap-south-1'
-          } : { 'Content-Type': 'application/json' },
+				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ concurrentExecutions })
 			});
 			if (!res.ok) {
@@ -342,15 +337,7 @@ const disableQueue = async (queueName) => {
 		try {
 			setControllerLoading(true);
       setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), disable: 'disabling' } }));
-      const res = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(functionName)}/disable-concurrency`, { 
-        method: 'POST',
-        headers: credentials?.accessKey && credentials?.secretKey ? {
-          'Content-Type': 'application/json',
-          'X-Aws-Access-Key': credentials.accessKey,
-          'X-Aws-Secret-Key': credentials.secretKey,
-          'X-Aws-Region': credentials.region || 'ap-south-1'
-        } : { 'Content-Type': 'application/json' }
-      });
+      const res = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(functionName)}/disable-concurrency`, { method: 'POST' });
 			if (!res.ok) {
 				const err = await res.json().catch(() => ({}));
 				alert(`Failed to disable concurrency: ${err.error || res.status}`);
@@ -397,41 +384,23 @@ useEffect(() => {
 }, [activeTab, isConnected]);
 
 // Auto-load Lambda concurrency status/current for table columns
-const loadAllLambdaConcurrency = async (retryCount = 0) => {
+const loadAllLambdaConcurrency = async () => {
     try {
         const names = (awsData.lambda || []).map(f => f.name).filter(Boolean);
         if (names.length === 0) return;
-        
-        // Add a small delay between requests to avoid overwhelming AWS API
-        const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-        
-        const entries = await Promise.all(names.map(async (name, index) => {
+        const entries = await Promise.all(names.map(async (name) => {
             try {
-                // Stagger requests to avoid rate limiting
-                if (index > 0) await delay(100);
-                
-                const res = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(name)}/concurrency-status`, {
-                  headers: credentials?.accessKey && credentials?.secretKey ? {
-                    'X-Aws-Access-Key': credentials.accessKey,
-                    'X-Aws-Secret-Key': credentials.secretKey,
-                    'X-Aws-Region': credentials.region || 'ap-south-1'
-                  } : {}
-                });
-                if (!res.ok) {
-                    console.warn(`Failed to fetch status for ${name}: ${res.status}`);
-                    return [name, { status: 'unknown' }];
-                }
+                const res = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(name)}/concurrency-status`);
+                if (!res.ok) return [name, { status: 'unknown' }];
                 const data = await res.json();
                 return [name, {
                     status: data?.status || 'unknown',
                     current: (typeof data?.provisionedConcurrentExecutions === 'number') ? data.provisionedConcurrentExecutions : undefined
                 }];
-            } catch (error) {
-                console.warn(`Error fetching status for ${name}:`, error);
+            } catch {
                 return [name, { status: 'unknown' }];
             }
         }));
-        
         setLambdaActionState(prev => {
             const next = { ...prev };
             for (const [name, info] of entries) {
@@ -439,13 +408,6 @@ const loadAllLambdaConcurrency = async (retryCount = 0) => {
             }
             return next;
         });
-        
-        // If we got many 'unknown' statuses and this is the first retry, try again after a delay
-        const unknownCount = entries.filter(([_, info]) => info.status === 'unknown').length;
-        if (unknownCount > names.length / 2 && retryCount === 0) {
-            console.log('Many unknown statuses detected, retrying in 2 seconds...');
-            setTimeout(() => loadAllLambdaConcurrency(1), 2000);
-        }
     } catch (e) {
         console.error('Error loading lambda concurrency:', e);
     }
@@ -471,21 +433,6 @@ useEffect(() => {
         return 'text-yellow-600 bg-yellow-100';
       default:
         return 'text-gray-600 bg-gray-100';
-    }
-  };
-
-  const getLambdaStatusDisplay = (status) => {
-    switch (status?.toLowerCase()) {
-      case 'enabled':
-        return 'Enabled';
-      case 'disabled':
-        return 'Disabled';
-      case 'no_published_version':
-        return 'No Published Version';
-      case 'unknown':
-        return 'Unknown';
-      default:
-        return status || 'Unknown';
     }
   };
 
@@ -1071,8 +1018,8 @@ useEffect(() => {
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{func.runtime || '-'}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{func.last_modified ? new Date(func.last_modified).toLocaleDateString() : '-'}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm">
-                          <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${lambdaActionState[func.name]?.status === 'enabled' ? 'bg-green-100 text-green-700' : lambdaActionState[func.name]?.status === 'disabled' ? 'bg-red-100 text-red-700' : lambdaActionState[func.name]?.status === 'no_published_version' ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100 text-gray-700'}`}>
-                            {getLambdaStatusDisplay(lambdaActionState[func.name]?.status)}
+                          <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${lambdaActionState[func.name]?.status === 'enabled' ? 'bg-green-100 text-green-700' : lambdaActionState[func.name]?.status === 'disabled' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-700'}`}>
+                            {lambdaActionState[func.name]?.status ? (lambdaActionState[func.name]?.status[0].toUpperCase() + lambdaActionState[func.name]?.status.slice(1)) : 'Unknown'}
                           </span>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">
