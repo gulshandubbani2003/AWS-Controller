@@ -309,7 +309,12 @@ const disableQueue = async (queueName) => {
       setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), enable: 'enabling' } }));
       const res = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(functionName)}/enable-concurrency`, {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
+				headers: credentials?.accessKey && credentials?.secretKey ? {
+            'Content-Type': 'application/json',
+            'X-Aws-Access-Key': credentials.accessKey,
+            'X-Aws-Secret-Key': credentials.secretKey,
+            'X-Aws-Region': credentials.region || 'ap-south-1'
+          } : { 'Content-Type': 'application/json' },
 				body: JSON.stringify({ concurrentExecutions })
 			});
 			if (!res.ok) {
@@ -337,7 +342,15 @@ const disableQueue = async (queueName) => {
 		try {
 			setControllerLoading(true);
       setLambdaActionState(prev => ({ ...prev, [functionName]: { ...(prev[functionName]||{}), disable: 'disabling' } }));
-      const res = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(functionName)}/disable-concurrency`, { method: 'POST' });
+      const res = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(functionName)}/disable-concurrency`, { 
+        method: 'POST',
+        headers: credentials?.accessKey && credentials?.secretKey ? {
+          'Content-Type': 'application/json',
+          'X-Aws-Access-Key': credentials.accessKey,
+          'X-Aws-Secret-Key': credentials.secretKey,
+          'X-Aws-Region': credentials.region || 'ap-south-1'
+        } : { 'Content-Type': 'application/json' }
+      });
 			if (!res.ok) {
 				const err = await res.json().catch(() => ({}));
 				alert(`Failed to disable concurrency: ${err.error || res.status}`);
@@ -397,7 +410,13 @@ const loadAllLambdaConcurrency = async (retryCount = 0) => {
                 // Stagger requests to avoid rate limiting
                 if (index > 0) await delay(100);
                 
-                const res = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(name)}/concurrency-status`);
+                const res = await fetch(`${API_BASE_URL}/lambda/${encodeURIComponent(name)}/concurrency-status`, {
+                  headers: credentials?.accessKey && credentials?.secretKey ? {
+                    'X-Aws-Access-Key': credentials.accessKey,
+                    'X-Aws-Secret-Key': credentials.secretKey,
+                    'X-Aws-Region': credentials.region || 'ap-south-1'
+                  } : {}
+                });
                 if (!res.ok) {
                     console.warn(`Failed to fetch status for ${name}: ${res.status}`);
                     return [name, { status: 'unknown' }];
