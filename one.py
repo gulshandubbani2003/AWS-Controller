@@ -11,22 +11,39 @@ import os
 
 app = Flask(__name__)
 
-# GUARANTEED CORS FIX - Manual handler for ALL responses
-@app.after_request
-def after_request(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-    return response
+# FINAL CORS HANDLER: explicit origin matching and OPTIONS short-circuit
+ALLOWED_ORIGINS = {
+    'https://aws-controller.vercel.app',
+    'https://cloudsentinel.vercel.app',
+    'http://localhost:3000'
+}
 
 @app.before_request
-def handle_preflight():
-    if request.method == "OPTIONS":
-        response = jsonify({})
+def cors_preflight():
+    if request.method == 'OPTIONS':
+        origin = request.headers.get('Origin', '*')
+        allow_origin = origin if origin in ALLOWED_ORIGINS else '*'
+        resp = jsonify({})
+        resp.headers['Access-Control-Allow-Origin'] = allow_origin
+        resp.headers['Vary'] = 'Origin'
+        resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        resp.headers['Access-Control-Allow-Headers'] = request.headers.get('Access-Control-Request-Headers', 'Content-Type, Authorization')
+        return resp
+
+@app.after_request
+def add_cors_headers(response):
+    origin = request.headers.get('Origin')
+    if origin:
+        allow_origin = origin if origin in ALLOWED_ORIGINS else '*'
+        response.headers['Access-Control-Allow-Origin'] = allow_origin
+        response.headers['Vary'] = 'Origin'
+        response.headers.setdefault('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+        response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+    else:
         response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        return response
+        response.headers.setdefault('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+        response.headers.setdefault('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+    return response
 
 # Global variables for AWS session
 baseSession = None
