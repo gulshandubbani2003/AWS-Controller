@@ -11,7 +11,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for React frontend
+CORS(app, origins="*", allow_headers=["Content-Type", "Authorization"], supports_credentials=False)  # Enable CORS for React frontend
+
+# Global error handler to ensure CORS headers on ALL responses
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+    return response
 
 # Global variables for AWS session
 baseSession = None
