@@ -1300,6 +1300,10 @@ def lambda_concurrency_status(functionName: str):
             msg = str(inner)
             if 'AccessDenied' in msg or 'UnrecognizedClient' in msg or 'InvalidClientTokenId' in msg:
                 return jsonify({'status': 'unknown', 'message': 'AWS credentials or permissions issue'})
+            if 'ResourceNotFoundException' in msg:
+                return jsonify({'status': 'disabled'})
+            if 'ThrottlingException' in msg or 'ServiceUnavailable' in msg:
+                return jsonify({'status': 'unknown', 'message': 'AWS service temporarily unavailable'})
             return jsonify({'status': 'unknown', 'message': msg}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
