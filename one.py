@@ -1,6 +1,5 @@
 # app.py - Flask backend based on your existing AWS code
 from flask import Flask, jsonify, request
-from flask_cors import CORS
 import boto3
 import json
 import logging
@@ -11,7 +10,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 
 app = Flask(__name__)
-CORS(app, origins=["*"], allow_headers=["Content-Type", "Authorization"], supports_credentials=False)  # Enable CORS for React frontend
+
+# GUARANTEED CORS FIX - Manual handler for ALL responses
+@app.after_request
+def after_request(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    return response
+
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = jsonify({})
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        return response
 
 # Global variables for AWS session
 baseSession = None
