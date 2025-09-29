@@ -21,7 +21,7 @@ def initialize_aws_session():
     if baseSession is None:
         try:
             # Use default region from environment or ap-south-1
-            region = os.environ.get('AWS_DEFAULT_REGION', 'ap-south-1')
+            region = os.environ.get('AWS_DEFAULT_REGION') or os.environ.get('AWS_REGION') or 'ap-south-1'
             baseSession = boto3.Session(region_name=region)
             print(f"AWS session initialized with region: {region}")
         except Exception as e:
@@ -29,6 +29,11 @@ def initialize_aws_session():
 
 # Initialize session on module load
 initialize_aws_session()
+
+# Ensure a session exists for request handlers that might be hit before explicit connect
+def ensure_session():
+    if baseSession is None:
+        initialize_aws_session()
 
 # FINAL CORS HANDLER: explicit origin matching and OPTIONS short-circuit
 ALLOWED_ORIGINS = {
@@ -1257,6 +1262,7 @@ def lambda_disable_concurrency(functionName: str):
 
 @app.route('/api/lambda/<functionName>/concurrency-status', methods=['GET'])
 def lambda_concurrency_status(functionName: str):
+    ensure_session()
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     try:
@@ -1325,6 +1331,7 @@ def lambda_concurrency_status(functionName: str):
 
 @app.route('/api/lambda/invoke', methods=['POST'])
 def lambda_invoke():
+    ensure_session()
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     data = request.json or {}
@@ -1347,6 +1354,7 @@ def lambda_invoke():
 
 @app.route('/api/sqs', methods=['GET'])
 def list_sqs():
+    ensure_session()
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     try:
