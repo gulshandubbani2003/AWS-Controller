@@ -813,6 +813,7 @@ def connect_aws():
 @app.route('/api/resources', methods=['GET'])
 def get_all_resources():
     """Get all AWS resources"""
+    ensure_session()
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     
@@ -825,36 +826,42 @@ def get_all_resources():
 
 @app.route('/api/ec2', methods=['GET'])
 def get_ec2_instances():
+    ensure_session()
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     return jsonify(list_ec2_instances())
 
 @app.route('/api/s3', methods=['GET'])
 def get_s3_buckets():
+    ensure_session()
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     return jsonify(list_s3_buckets())
 
 @app.route('/api/rds', methods=['GET'])
 def get_rds_instances():
+    ensure_session()
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     return jsonify(list_rds_instances())
 
 @app.route('/api/lambda', methods=['GET'])
 def get_lambda_functions():
+    ensure_session()
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     return jsonify(list_lambda_functions())
 
 @app.route('/api/vpc', methods=['GET'])
 def get_vpcs():
+    ensure_session()
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     return jsonify(list_vpc())
 
 @app.route('/api/security', methods=['GET'])
 def get_security_alerts():
+    ensure_session()
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     return jsonify(security_alerts)
@@ -862,6 +869,7 @@ def get_security_alerts():
 @app.route('/api/cloudwatch/metrics', methods=['GET'])
 def get_metrics():
     """Get CloudWatch metrics"""
+    ensure_session()
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     try:
@@ -873,6 +881,7 @@ def get_metrics():
 @app.route('/api/cloudwatch/logs', methods=['GET'])
 def get_logs():
     """Get CloudWatch logs"""
+    ensure_session()
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     try:
@@ -884,6 +893,7 @@ def get_logs():
 @app.route('/api/cloudwatch/security', methods=['GET'])
 def get_cloudwatch_security_alerts():
     """Get CloudWatch security alerts"""
+    ensure_session()
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     try:
@@ -895,6 +905,7 @@ def get_cloudwatch_security_alerts():
 @app.route('/api/cloudwatch/alarms', methods=['GET'])
 def get_alarms():
     """Get CloudWatch alarms"""
+    ensure_session()
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     try:
