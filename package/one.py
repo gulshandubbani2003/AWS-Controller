@@ -11,6 +11,25 @@ import os
 
 app = Flask(__name__)
 
+# Initialize AWS session for Lambda deployment
+baseSession = None
+current_credentials = None
+
+# Auto-initialize AWS session when running in Lambda
+def initialize_aws_session():
+    global baseSession
+    if baseSession is None:
+        try:
+            # Use default region from environment or ap-south-1
+            region = os.environ.get('AWS_DEFAULT_REGION', 'ap-south-1')
+            baseSession = boto3.Session(region_name=region)
+            print(f"AWS session initialized with region: {region}")
+        except Exception as e:
+            print(f"Error initializing AWS session: {e}")
+
+# Initialize session on module load
+initialize_aws_session()
+
 # FINAL CORS HANDLER: explicit origin matching and OPTIONS short-circuit
 ALLOWED_ORIGINS = {
     'https://aws-controller.vercel.app',
