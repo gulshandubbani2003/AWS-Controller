@@ -1422,12 +1422,21 @@ def ec2_ssh_activity():
         end_ts = int(time.time())
         start_ts = end_ts - hours * 3600
 
-        # Query per (eni, srcAddr) hit counts for TCP:22 ACCEPT
-        query_string = (
-            "fields interfaceId, srcAddr, dstPort, protocol, action\n"
-            "| filter action = 'ACCEPT' and dstPort = 22 and protocol = 6\n"
-            "| stats count() as hits by interfaceId, srcAddr\n"
-            "| sort hits desc\n"
+        # Query per (eni, srcAddr) hit counts for SSH (port 22) ACCEPT.
+        # Try dstPort first (inbound to instance). If empty, try srcPort (edge cases / reverse flows).
+        base_fields = "fields interfaceId, srcAddr, dstPort, srcPort, protocol, action\n"
+        query_dst = (
+            base_fields +
+            "| filter action = 'ACCEPT' and protocol = 6 and dstPort = 22\n"+
+            "| stats count() as hits by interfaceId, srcAddr\n"+
+            "| sort hits desc\n"+
+            "| limit 50000"
+        )
+        query_src = (
+            base_fields +
+            "| filter action = 'ACCEPT' and protocol = 6 and srcPort = 22\n"+
+            "| stats count() as hits by interfaceId, srcAddr\n"+
+            "| sort hits desc\n"+
             "| limit 50000"
         )
 
@@ -1436,7 +1445,7 @@ def ec2_ssh_activity():
                 logGroupName=log_group,
                 startTime=start_ts,
                 endTime=end_ts,
-                queryString=query_string
+                queryString=query_dst
             )
         except Exception as e:
             return jsonify({'items': [], 'windowHours': hours, 'logGroup': log_group, 'note': f'Failed to start Logs Insights query: {str(e)}'}), 200
@@ -1454,6 +1463,28 @@ def ec2_ssh_activity():
                 break
         if status != 'Complete':
             return jsonify({'items': [], 'windowHours': hours, 'logGroup': log_group, 'note': f'Logs Insights query {status}'}), 200
+
+        # If no inbound hits, try the srcPort=22 variant
+        if not results:
+            try:
+                start2 = logs.start_query(
+                    logGroupName=log_group,
+                    startTime=start_ts,
+                    endTime=end_ts,
+                    queryString=query_src
+                )
+                qid2 = start2.get('queryId')
+                for _ in range(30):
+                    time.sleep(1.0)
+                    resp2 = logs.get_query_results(queryId=qid2)
+                    st2 = resp2.get('status')
+                    if st2 in ('Complete', 'Failed', 'Cancelled', 'Timeout'):
+                        if st2 == 'Complete':
+                            results = resp2.get('results', [])
+                        break
+            except Exception as e:
+                # ignore; continue with empty results
+                pass
 
         # Convert results to dictionaries
         def as_dict(row):
