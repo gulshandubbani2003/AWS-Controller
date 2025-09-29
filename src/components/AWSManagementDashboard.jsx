@@ -30,7 +30,7 @@ import {
   MapPin
 } from 'lucide-react';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001/api';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://yra6ryqes5jg2wzdaccff2assq0gjulz.lambda-url.ap-south-1.on.aws/api';
 
 const AWSManagementDashboard = () => {
   const [credentials, setCredentials] = useState({ 
