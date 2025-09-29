@@ -1390,13 +1390,26 @@ def ec2_ssh_activity():
         hours = int(request.args.get('hours', '24'))
         limit = int(request.args.get('limit', '10'))
         log_group = request.args.get('logGroup') or os.environ.get('FLOW_LOGS_LOG_GROUP')
+        logs = baseSession.client('logs')
+        # If not provided, try to auto-discover a VPC Flow Logs group
         if not log_group:
-            return jsonify({'error': 'FLOW_LOGS_LOG_GROUP env not set and no logGroup provided'}), 400
+            try:
+                paginator = logs.get_paginator('describe_log_groups')
+                latest = None
+                for page in paginator.paginate(logGroupNamePrefix='/aws/vpc/flow-logs'):
+                    for g in page.get('logGroups', []) or []:
+                        # pick the most recently created group
+                        if (latest is None) or (g.get('creationTime', 0) > latest.get('creationTime', 0)):
+                            latest = g
+                if latest and latest.get('logGroupName'):
+                    log_group = latest['logGroupName']
+                else:
+                    return jsonify({'items': [], 'windowHours': hours, 'note': 'No VPC Flow Logs log group found. Set FLOW_LOGS_LOG_GROUP env or enable VPC Flow Logs.'}), 200
+            except Exception as e:
+                return jsonify({'items': [], 'windowHours': hours, 'note': f'Could not list log groups: {str(e)}'}), 200
 
         end_ts = int(time.time())
         start_ts = end_ts - hours * 3600
-
-        logs = baseSession.client('logs')
 
         # Query per (eni, srcAddr) hit counts for TCP:22 ACCEPT
         query_string = (
@@ -1407,12 +1420,15 @@ def ec2_ssh_activity():
             "| limit 50000"
         )
 
-        start = logs.start_query(
-            logGroupName=log_group,
-            startTime=start_ts,
-            endTime=end_ts,
-            queryString=query_string
-        )
+        try:
+            start = logs.start_query(
+                logGroupName=log_group,
+                startTime=start_ts,
+                endTime=end_ts,
+                queryString=query_string
+            )
+        except Exception as e:
+            return jsonify({'items': [], 'windowHours': hours, 'logGroup': log_group, 'note': f'Failed to start Logs Insights query: {str(e)}'}), 200
         query_id = start.get('queryId')
 
         # Poll for results
@@ -1426,7 +1442,7 @@ def ec2_ssh_activity():
                 results = resp.get('results', [])
                 break
         if status != 'Complete':
-            return jsonify({'error': f'Logs Insights query did not complete', 'status': status}), 502
+            return jsonify({'items': [], 'windowHours': hours, 'logGroup': log_group, 'note': f'Logs Insights query {status}'}), 200
 
         # Convert results to dictionaries
         def as_dict(row):
@@ -1451,13 +1467,29 @@ def ec2_ssh_activity():
         eni_ids = list(eni_to_sources.keys())
         eni_to_instance = {}
         # Describe in chunks of 100
-        for i in range(0, len(eni_ids), 100):
-            batch = eni_ids[i:i+100]
-            desc = ec2.describe_network_interfaces(NetworkInterfaceIds=batch)
-            for ni in desc.get('NetworkInterfaces', []) or []:
-                att = ni.get('Attachment') or {}
-                inst_id = att.get('InstanceId')
-                eni_to_instance[ni.get('NetworkInterfaceId')] = inst_id
+        try:
+            for i in range(0, len(eni_ids), 100):
+                batch = eni_ids[i:i+100]
+                if not batch:
+                    continue
+                desc = ec2.describe_network_interfaces(NetworkInterfaceIds=batch)
+                for ni in desc.get('NetworkInterfaces', []) or []:
+                    att = ni.get('Attachment') or {}
+                    inst_id = att.get('InstanceId')
+                    eni_to_instance[ni.get('NetworkInterfaceId')] = inst_id
+        except Exception as e:
+            # Fall back to showing ENI-based results if Describe is not permitted
+            items = []
+            for eni, sources in eni_to_sources.items():
+                total = sum(s['hits'] for s in sources)
+                merged = {}
+                for s in sources:
+                    merged[s['ip']] = merged.get(s['ip'], 0) + s['hits']
+                top = [{'ip': ip, 'hits': hits} for ip, hits in merged.items()]
+                top.sort(key=lambda x: x['hits'], reverse=True)
+                items.append({'instanceId': f'eni:{eni}', 'totalConnections': total, 'uniqueSourceIps': len(merged), 'topSources': top[:limit]})
+            items.sort(key=lambda x: x['totalConnections'], reverse=True)
+            return jsonify({'items': items, 'windowHours': hours, 'logGroup': log_group, 'note': f'Partial results (no DescribeNetworkInterfaces): {str(e)}'}), 200
 
         # Aggregate per instance
         per_instance = {}
