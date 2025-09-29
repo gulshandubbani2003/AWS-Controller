@@ -1369,6 +1369,126 @@ def list_sqs():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+# ----------------------------------------
+# VPC Flow Logs based SSH activity summary
+# ----------------------------------------
+
+@app.route('/api/ec2/ssh-activity', methods=['GET'])
+def ec2_ssh_activity():
+    """Summarize SSH (port 22) connections per EC2 instance using VPC Flow Logs.
+
+    Query params (optional):
+      - hours: lookback window, default 24
+      - logGroup: CloudWatch Logs group name for VPC Flow Logs. If omitted, uses env FLOW_LOGS_LOG_GROUP
+      - limit: max source breakdown entries per instance, default 10
+    """
+    ensure_session()
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+
+    try:
+        hours = int(request.args.get('hours', '24'))
+        limit = int(request.args.get('limit', '10'))
+        log_group = request.args.get('logGroup') or os.environ.get('FLOW_LOGS_LOG_GROUP')
+        if not log_group:
+            return jsonify({'error': 'FLOW_LOGS_LOG_GROUP env not set and no logGroup provided'}), 400
+
+        end_ts = int(time.time())
+        start_ts = end_ts - hours * 3600
+
+        logs = baseSession.client('logs')
+
+        # Query per (eni, srcAddr) hit counts for TCP:22 ACCEPT
+        query_string = (
+            "fields interfaceId, srcAddr, dstPort, protocol, action\n"
+            "| filter action = 'ACCEPT' and dstPort = 22 and protocol = 6\n"
+            "| stats count() as hits by interfaceId, srcAddr\n"
+            "| sort hits desc\n"
+            "| limit 50000"
+        )
+
+        start = logs.start_query(
+            logGroupName=log_group,
+            startTime=start_ts,
+            endTime=end_ts,
+            queryString=query_string
+        )
+        query_id = start.get('queryId')
+
+        # Poll for results
+        status = 'Running'
+        results = []
+        for _ in range(30):
+            time.sleep(1.0)
+            resp = logs.get_query_results(queryId=query_id)
+            status = resp.get('status')
+            if status in ('Complete', 'Failed', 'Cancelled', 'Timeout'):
+                results = resp.get('results', [])
+                break
+        if status != 'Complete':
+            return jsonify({'error': f'Logs Insights query did not complete', 'status': status}), 502
+
+        # Convert results to dictionaries
+        def as_dict(row):
+            return {kv['field']: kv['value'] for kv in row}
+
+        eni_to_sources = {}
+        for row in results:
+            item = as_dict(row)
+            eni = item.get('interfaceId')
+            src = item.get('srcAddr')
+            hits = int(item.get('hits', '0')) if item.get('hits') is not None else 0
+            if not eni or not src:
+                continue
+            lst = eni_to_sources.setdefault(eni, [])
+            lst.append({'ip': src, 'hits': hits})
+
+        if not eni_to_sources:
+            return jsonify({'items': [], 'windowHours': hours})
+
+        # Map ENI -> InstanceId
+        ec2 = baseSession.client('ec2')
+        eni_ids = list(eni_to_sources.keys())
+        eni_to_instance = {}
+        # Describe in chunks of 100
+        for i in range(0, len(eni_ids), 100):
+            batch = eni_ids[i:i+100]
+            desc = ec2.describe_network_interfaces(NetworkInterfaceIds=batch)
+            for ni in desc.get('NetworkInterfaces', []) or []:
+                att = ni.get('Attachment') or {}
+                inst_id = att.get('InstanceId')
+                eni_to_instance[ni.get('NetworkInterfaceId')] = inst_id
+
+        # Aggregate per instance
+        per_instance = {}
+        for eni, sources in eni_to_sources.items():
+            inst_id = eni_to_instance.get(eni) or f"eni:{eni}"
+            acc = per_instance.setdefault(inst_id, {'totalConnections': 0, 'uniqueSourceIps': 0, 'topSources': []})
+            acc['totalConnections'] += sum(s['hits'] for s in sources)
+            # Merge sources by IP
+            ip_to_hits = {s['ip']: s['hits'] for s in acc['topSources']}
+            for s in sources:
+                ip_to_hits[s['ip']] = ip_to_hits.get(s['ip'], 0) + s['hits']
+            # Rebuild sorted top list
+            merged = [{'ip': ip, 'hits': hits} for ip, hits in ip_to_hits.items()]
+            merged.sort(key=lambda x: x['hits'], reverse=True)
+            acc['topSources'] = merged[:limit]
+            acc['uniqueSourceIps'] = len(ip_to_hits)
+
+        # Format items
+        items = []
+        for inst_id, data in per_instance.items():
+            items.append({
+                'instanceId': inst_id,
+                **data
+            })
+        # Sort by total connections desc
+        items.sort(key=lambda x: x['totalConnections'], reverse=True)
+
+        return jsonify({'items': items, 'windowHours': hours})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/sqs/details', methods=['GET'])
 def list_sqs_with_attributes():
     if not baseSession:
