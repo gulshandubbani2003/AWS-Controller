@@ -57,6 +57,8 @@ const AWSManagementDashboard = () => {
   });
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [sshActivity, setSshActivity] = useState({}); // { [instanceId]: { totalConnections, uniqueSourceIps, topSources: [] } }
+  const [sshLoading, setSshLoading] = useState(false);
 
 	// Controller state
 	const [controllerApps, setControllerApps] = useState([]);
@@ -112,6 +114,29 @@ const AWSManagementDashboard = () => {
       alert('Connection failed. Please check your credentials.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Fetch SSH activity (from VPC Flow Logs) for last 24h
+  const loadSshActivity = async () => {
+    try {
+      setSshLoading(true);
+      const res = await fetch(`${API_BASE_URL}/ec2/ssh-activity?hours=24`);
+      if (!res.ok) {
+        setSshActivity({});
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      const map = {};
+      (data.items || []).forEach(item => {
+        if (item && item.instanceId) map[item.instanceId] = item;
+      });
+      setSshActivity(map);
+    } catch (e) {
+      console.error('Error loading SSH activity:', e);
+      setSshActivity({});
+    } finally {
+      setSshLoading(false);
     }
   };
 
@@ -374,6 +399,14 @@ const disableQueue = async (queueName) => {
 		}
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [selectedApp, selectedServiceType]);
+
+  // Load SSH activity whenever EC2 tab is active or EC2 list changes
+  useEffect(() => {
+    if (isConnected && activeTab === 'ec2' && (awsData.ec2 || []).length > 0) {
+      loadSshActivity();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, isConnected, awsData.ec2]);
 
 	// Load SQS details when switching to SQS tab
 useEffect(() => {
@@ -858,6 +891,7 @@ useEffect(() => {
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Type</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">IP Addresses</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">AZ</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">SSH (24h)</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                   </tr>
                 </thead>
@@ -890,6 +924,17 @@ useEffect(() => {
                           <MapPin className="h-3 w-3 mr-1" />
                           {instance.availability_zone}
                         </span>
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                        {sshLoading && Object.keys(sshActivity).length === 0 ? (
+                          <span className="text-gray-400">Loading…</span>
+                        ) : (
+                          (() => {
+                            const info = sshActivity[instance.instance_id];
+                            if (!info) return <span className="text-gray-400">-</span>;
+                            return <span>{info.totalConnections || 0} ({info.uniqueSourceIps || 0} IPs)</span>;
+                          })()
+                        )}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm">
                         <div className="flex items-center gap-2">
