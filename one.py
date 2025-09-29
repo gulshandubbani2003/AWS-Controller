@@ -1533,7 +1533,7 @@ def ec2_ssh_activity():
             items.sort(key=lambda x: x['totalConnections'], reverse=True)
             return jsonify({'items': items, 'windowHours': hours, 'logGroup': log_group, 'note': f'Partial results (no DescribeNetworkInterfaces): {str(e)}'}), 200
 
-        # Aggregate per instance
+        # Aggregate per instance (will merge VPC Flow Logs + CloudTrail EIC)
         per_instance = {}
         for eni, sources in eni_to_sources.items():
             inst_id = eni_to_instance.get(eni) or f"eni:{eni}"
@@ -1549,13 +1549,49 @@ def ec2_ssh_activity():
             acc['topSources'] = merged[:limit]
             acc['uniqueSourceIps'] = len(ip_to_hits)
 
+        # Supplement with CloudTrail EC2 Instance Connect events
+        try:
+            ct = baseSession.client('cloudtrail')
+            ct_events = []
+            ct_paginator = ct.get_paginator('lookup_events')
+            for page in ct_paginator.paginate(
+                LookupAttributes=[{'AttributeKey': 'EventName', 'AttributeValue': 'SendSSHPublicKey'}],
+                StartTime=datetime.utcfromtimestamp(start_ts),
+                EndTime=datetime.utcfromtimestamp(end_ts)
+            ):
+                ct_events.extend(page.get('Events', []) or [])
+
+            for ev in ct_events:
+                # Extract instance id from resources or request parameters
+                instance_id = None
+                for r in ev.get('Resources', []) or []:
+                    if r.get('ResourceType') == 'AWS::EC2::Instance' and r.get('ResourceName'):
+                        instance_id = r['ResourceName']
+                        break
+                if not instance_id:
+                    try:
+                        rp = json.loads(ev.get('CloudTrailEvent') or '{}').get('requestParameters') or {}
+                        instance_id = rp.get('instanceId')
+                    except Exception:
+                        instance_id = None
+                src_ip = ev.get('SourceIPAddress') or 'unknown'
+                if not instance_id:
+                    continue
+                acc = per_instance.setdefault(instance_id, {'totalConnections': 0, 'uniqueSourceIps': 0, 'topSources': []})
+                acc['totalConnections'] += 1
+                ip_to_hits = {s['ip']: s['hits'] for s in acc['topSources']}
+                ip_to_hits[src_ip] = ip_to_hits.get(src_ip, 0) + 1
+                merged = [{'ip': ip, 'hits': hits} for ip, hits in ip_to_hits.items()]
+                merged.sort(key=lambda x: x['hits'], reverse=True)
+                acc['topSources'] = merged[:limit]
+                acc['uniqueSourceIps'] = len(ip_to_hits)
+        except Exception:
+            pass
+
         # Format items
         items = []
         for inst_id, data in per_instance.items():
-            items.append({
-                'instanceId': inst_id,
-                **data
-            })
+            items.append({'instanceId': inst_id, **data})
         # Sort by total connections desc
         items.sort(key=lambda x: x['totalConnections'], reverse=True)
 
