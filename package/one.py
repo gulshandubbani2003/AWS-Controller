@@ -1455,6 +1455,58 @@ def ec2_ssh_activity():
         end_ts = int(time.time())
         start_ts = end_ts - hours * 3600
 
+        # First, try to compute SSH activity strictly from CloudTrail EC2 Instance Connect events.
+        # This represents actual people initiating SSH via EIC. If we find any, we will return
+        # ONLY these results to avoid inflating counts with generic TCP connection attempts.
+        try:
+            ct = baseSession.client('cloudtrail')
+            ct_events = []
+            ct_paginator = ct.get_paginator('lookup_events')
+            for page in ct_paginator.paginate(
+                LookupAttributes=[{'AttributeKey': 'EventName', 'AttributeValue': 'SendSSHPublicKey'}],
+                StartTime=datetime.utcfromtimestamp(start_ts),
+                EndTime=datetime.utcfromtimestamp(end_ts)
+            ):
+                ct_events.extend(page.get('Events', []) or [])
+
+            ct_per_instance: dict[str, dict] = {}
+            for ev in ct_events:
+                # Extract instance id from resources or request parameters
+                instance_id = None
+                for r in ev.get('Resources', []) or []:
+                    if r.get('ResourceType') == 'AWS::EC2::Instance' and r.get('ResourceName'):
+                        instance_id = r['ResourceName']
+                        break
+                if not instance_id:
+                    try:
+                        rp = json.loads(ev.get('CloudTrailEvent') or '{}').get('requestParameters') or {}
+                        instance_id = rp.get('instanceId')
+                    except Exception:
+                        instance_id = None
+                src_ip = ev.get('SourceIPAddress') or 'unknown'
+                if not instance_id:
+                    continue
+                acc = ct_per_instance.setdefault(instance_id, {'totalConnections': 0, 'uniqueSourceIps': 0, 'topSources': []})
+                acc['totalConnections'] += 1
+                ip_to_times = {s['ip']: (s.get('times') if 'times' in s else s.get('hits', 0)) for s in acc['topSources']}
+                ip_to_times[src_ip] = ip_to_times.get(src_ip, 0) + 1
+                merged = [{'ip': ip, 'times': times} for ip, times in ip_to_times.items()]
+                merged.sort(key=lambda x: x['times'], reverse=True)
+                acc['topSources'] = merged[:limit]
+                acc['uniqueSourceIps'] = len(ip_to_times)
+
+            if ct_per_instance:
+                items = []
+                for inst_id, data in ct_per_instance.items():
+                    items.append({'instanceId': inst_id, **data})
+                items.sort(key=lambda x: x['totalConnections'], reverse=True)
+                return jsonify({'items': items, 'windowHours': hours, 'source': 'cloudtrail'}), 200
+            # If no CloudTrail EIC events found, return empty to avoid inflating counts with port scans.
+            return jsonify({'items': [], 'windowHours': hours, 'source': 'cloudtrail', 'note': 'No EC2 Instance Connect SSH events found'}), 200
+        except Exception:
+            # If CloudTrail is not permitted or returns nothing, fall back to Flow Logs below.
+            pass
+
         # Query per (eni, srcAddr) hit counts for SSH (port 22) ACCEPT.
         # Try dstPort first (inbound to instance). If empty, try srcPort (edge cases / reverse flows).
         base_fields = "fields interfaceId, srcAddr, dstPort, srcPort, protocol, action\n"
@@ -1588,44 +1640,7 @@ def ec2_ssh_activity():
             acc['topSources'] = merged[:limit]
             acc['uniqueSourceIps'] = len(ip_to_hits)
 
-        # Supplement with CloudTrail EC2 Instance Connect events
-        try:
-            ct = baseSession.client('cloudtrail')
-            ct_events = []
-            ct_paginator = ct.get_paginator('lookup_events')
-            for page in ct_paginator.paginate(
-                LookupAttributes=[{'AttributeKey': 'EventName', 'AttributeValue': 'SendSSHPublicKey'}],
-                StartTime=datetime.utcfromtimestamp(start_ts),
-                EndTime=datetime.utcfromtimestamp(end_ts)
-            ):
-                ct_events.extend(page.get('Events', []) or [])
-
-            for ev in ct_events:
-                # Extract instance id from resources or request parameters
-                instance_id = None
-                for r in ev.get('Resources', []) or []:
-                    if r.get('ResourceType') == 'AWS::EC2::Instance' and r.get('ResourceName'):
-                        instance_id = r['ResourceName']
-                        break
-                if not instance_id:
-                    try:
-                        rp = json.loads(ev.get('CloudTrailEvent') or '{}').get('requestParameters') or {}
-                        instance_id = rp.get('instanceId')
-                    except Exception:
-                        instance_id = None
-                src_ip = ev.get('SourceIPAddress') or 'unknown'
-                if not instance_id:
-                    continue
-                acc = per_instance.setdefault(instance_id, {'totalConnections': 0, 'uniqueSourceIps': 0, 'topSources': []})
-                acc['totalConnections'] += 1
-                ip_to_hits = {s['ip']: (s.get('times') if 'times' in s else s.get('hits', 0)) for s in acc['topSources']}
-                ip_to_hits[src_ip] = ip_to_hits.get(src_ip, 0) + 1
-                merged = [{'ip': ip, 'times': hits} for ip, hits in ip_to_hits.items()]
-                merged.sort(key=lambda x: x['times'], reverse=True)
-                acc['topSources'] = merged[:limit]
-                acc['uniqueSourceIps'] = len(ip_to_hits)
-        except Exception:
-            pass
+        # If CloudTrail yielded nothing, we fall back to Flow Logs (already processed above)
 
         # Format items
         items = []
