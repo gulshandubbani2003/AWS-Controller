@@ -123,7 +123,35 @@ def _get_latest_lambda_version(lambda_client, function_name: str) -> str | None:
                     continue
                 if latest_version_num is None or ver_num > latest_version_num:
                     latest_version_num = ver_num
-        return str(latest_version_num) if latest_version_num is not None else None
+        if latest_version_num is not None:
+            return str(latest_version_num)
+
+        # Fallback: check aliases for any numeric target version
+        try:
+            marker = None
+            best = None
+            while True:
+                if marker:
+                    resp = lambda_client.list_aliases(FunctionName=function_name, Marker=marker)
+                else:
+                    resp = lambda_client.list_aliases(FunctionName=function_name)
+                for a in resp.get('Aliases', []) or []:
+                    ver = a.get('FunctionVersion')
+                    if not ver or ver == '$LATEST':
+                        continue
+                    try:
+                        vnum = int(ver)
+                    except Exception:
+                        continue
+                    if best is None or vnum > best:
+                        best = vnum
+                marker = resp.get('NextMarker')
+                if not marker:
+                    break
+            return str(best) if best is not None else None
+        except Exception:
+            # If alias listing not permitted, just return None
+            return None
     except Exception as err:
         print(f"Error getting latest lambda version: {err}")
         return None
@@ -1309,32 +1337,11 @@ def lambda_concurrency_status(functionName: str):
             listed = lam.list_provisioned_concurrency_configs(FunctionName=functionName)
             configs = listed.get('ProvisionedConcurrencyConfigs', []) or []
             if not configs:
-                # Fall back to latest version check to provide friendly info
+                # No provisioned concurrency configured; report whether a version exists
                 version = _get_latest_lambda_version(lam, functionName)
-                if not version:
-                    return jsonify({'status': 'no_published_version'})
-                try:
-                    resp = lam.get_provisioned_concurrency_config(FunctionName=functionName, Qualifier=version)
-                    config = resp.get('ProvisionedConcurrencyConfig', {})
-                    status = (config.get('Status') or 'UNKNOWN')
-                    pce = config.get('ProvisionedConcurrentExecutions', 0)
-                    requested_pce = (config.get('RequestedConfiguration', {}) or {}).get('ProvisionedConcurrentExecutions', 0)
-                    actual_pce = pce if (status or '').upper() == 'READY' else requested_pce
-                    is_enabled = (status or '').upper() not in ['DISABLED', 'FAILED', 'UNKNOWN'] and (requested_pce or pce) > 0
-                    return jsonify({
-                        'status': 'enabled' if is_enabled else 'disabled',
-                        'version': version,
-                        'provisionedConcurrentExecutions': actual_pce,
-                        'aws_status': status
-                    })
-                except Exception as inner2:
-                    msg2 = str(inner2)
-                    if 'ResourceNotFoundException' in msg2:
-                        # Published version exists but no PC configured
-                        return jsonify({'status': 'disabled', 'version': version})
-                    if 'AccessDenied' in msg2 or 'UnrecognizedClient' in msg2 or 'InvalidClientTokenId' in msg2:
-                        return jsonify({'status': 'unknown', 'message': 'AWS credentials or permissions issue'})
-                    return jsonify({'status': 'unknown', 'message': msg2}), 200
+                if version:
+                    return jsonify({'status': 'disabled', 'version': version})
+                return jsonify({'status': 'no_published_version'})
 
             # Choose the config with the most recent LastModified or highest requested
             best = max(
