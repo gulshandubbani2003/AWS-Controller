@@ -105,13 +105,25 @@ def _find_queue_url(sqs_client, queue_name: str) -> str | None:
     return None
 
 def _get_latest_lambda_version(lambda_client, function_name: str) -> str | None:
+    """Return the highest published numeric version for the function.
+
+    Uses a paginator to avoid missing versions when there are many.
+    """
     try:
-        resp = lambda_client.list_versions_by_function(FunctionName=function_name)
-        versions = [v for v in resp.get('Versions', []) if v.get('Version') != '$LATEST']
-        if not versions:
-            return None
-        versions.sort(key=lambda v: int(v['Version']), reverse=True)
-        return versions[0]['Version']
+        paginator = lambda_client.get_paginator('list_versions_by_function')
+        latest_version_num = None
+        for page in paginator.paginate(FunctionName=function_name):
+            for v in page.get('Versions', []) or []:
+                ver = v.get('Version')
+                if not ver or ver == '$LATEST':
+                    continue
+                try:
+                    ver_num = int(ver)
+                except Exception:
+                    continue
+                if latest_version_num is None or ver_num > latest_version_num:
+                    latest_version_num = ver_num
+        return str(latest_version_num) if latest_version_num is not None else None
     except Exception as err:
         print(f"Error getting latest lambda version: {err}")
         return None
@@ -1263,11 +1275,24 @@ def lambda_disable_concurrency(functionName: str):
         return jsonify({'error': 'Not connected to AWS'}), 401
     try:
         lam = baseSession.client('lambda')
-        version = _get_latest_lambda_version(lam, functionName)
-        if not version:
-            return jsonify({'error': 'No published version found for this function'}), 400
-        lam.delete_provisioned_concurrency_config(FunctionName=functionName, Qualifier=version)
-        return jsonify({'success': True, 'functionName': functionName, 'version': version})
+        # Find any provisioned concurrency config for this function
+        try:
+            listed = lam.list_provisioned_concurrency_configs(FunctionName=functionName)
+            configs = listed.get('ProvisionedConcurrencyConfigs', []) or []
+            if not configs:
+                return jsonify({'error': 'No provisioned concurrency found for this function'}), 400
+            
+            # Get the first config's qualifier (version/alias)
+            qualifier = configs[0].get('Qualifier') or configs[0].get('FunctionArn', '').split(':')[-1]
+            lam.delete_provisioned_concurrency_config(FunctionName=functionName, Qualifier=qualifier)
+            return jsonify({'success': True, 'functionName': functionName, 'version': qualifier})
+        except Exception as list_err:
+            # Fallback to latest version method
+            version = _get_latest_lambda_version(lam, functionName)
+            if not version:
+                return jsonify({'error': 'No published version found for this function'}), 400
+            lam.delete_provisioned_concurrency_config(FunctionName=functionName, Qualifier=version)
+            return jsonify({'success': True, 'functionName': functionName, 'version': version})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -1305,7 +1330,8 @@ def lambda_concurrency_status(functionName: str):
                 except Exception as inner2:
                     msg2 = str(inner2)
                     if 'ResourceNotFoundException' in msg2:
-                        return jsonify({'status': 'disabled'})
+                        # Published version exists but no PC configured
+                        return jsonify({'status': 'disabled', 'version': version})
                     if 'AccessDenied' in msg2 or 'UnrecognizedClient' in msg2 or 'InvalidClientTokenId' in msg2:
                         return jsonify({'status': 'unknown', 'message': 'AWS credentials or permissions issue'})
                     return jsonify({'status': 'unknown', 'message': msg2}), 200
