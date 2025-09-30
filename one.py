@@ -1599,7 +1599,7 @@ def ec2_ssh_activity():
         if status != 'Complete':
             return jsonify({'items': [], 'windowHours': hours, 'logGroup': log_group, 'note': f'Logs Insights query {status}'}), 200
 
-        # If no inbound hits, try the srcPort=22 variant
+        # If no inbound matches, try the srcPort=22 variant
         if not results:
             try:
                 start2 = logs.start_query(
@@ -1619,6 +1619,34 @@ def ec2_ssh_activity():
                         break
             except Exception as e:
                 # ignore; continue with empty results
+                pass
+
+        # Final fallback: raw hit counts if distinct-based queries returned nothing
+        if not results:
+            try:
+                query_hits = (
+                    base_fields +
+                    "| filter action = 'ACCEPT' and protocol = 6 and (dstPort = 22 or srcPort = 22)\n"+
+                    "| stats count() as times by interfaceId, srcAddr\n"+
+                    "| sort times desc\n"+
+                    "| limit 10000"
+                )
+                start3 = logs.start_query(
+                    logGroupName=log_group,
+                    startTime=start_ts,
+                    endTime=end_ts,
+                    queryString=query_hits
+                )
+                qid3 = start3.get('queryId')
+                for _ in range(30):
+                    time.sleep(1.0)
+                    resp3 = logs.get_query_results(queryId=qid3)
+                    st3 = resp3.get('status')
+                    if st3 in ('Complete', 'Failed', 'Cancelled', 'Timeout'):
+                        if st3 == 'Complete':
+                            results = resp3.get('results', [])
+                        break
+            except Exception:
                 pass
 
         # Convert results to dictionaries
