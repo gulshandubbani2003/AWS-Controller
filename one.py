@@ -1461,15 +1461,15 @@ def ec2_ssh_activity():
         query_dst = (
             base_fields +
             "| filter action = 'ACCEPT' and protocol = 6 and dstPort = 22\n"+
-            "| stats count() as hits by interfaceId, srcAddr\n"+
-            "| sort hits desc\n"+
+            "| stats count_distinct(srcPort) as times by interfaceId, srcAddr\n"+
+            "| sort times desc\n"+
             "| limit 10000"
         )
         query_src = (
             base_fields +
             "| filter action = 'ACCEPT' and protocol = 6 and srcPort = 22\n"+
-            "| stats count() as hits by interfaceId, srcAddr\n"+
-            "| sort hits desc\n"+
+            "| stats count_distinct(dstPort) as times by interfaceId, srcAddr\n"+
+            "| sort times desc\n"+
             "| limit 10000"
         )
 
@@ -1528,11 +1528,15 @@ def ec2_ssh_activity():
             item = as_dict(row)
             eni = item.get('interfaceId')
             src = item.get('srcAddr')
-            hits = int(item.get('hits', '0')) if item.get('hits') is not None else 0
+            # Prefer 'times' (distinct connections), fallback to 'hits'
+            times_val = item.get('times')
+            if times_val is None:
+                times_val = item.get('hits')
+            times = int(times_val or '0')
             if not eni or not src:
                 continue
             lst = eni_to_sources.setdefault(eni, [])
-            lst.append({'ip': src, 'hits': hits})
+            lst.append({'ip': src, 'times': times})
 
         if not eni_to_sources:
             return jsonify({'items': [], 'windowHours': hours})
@@ -1556,12 +1560,13 @@ def ec2_ssh_activity():
             # Fall back to showing ENI-based results if Describe is not permitted
             items = []
             for eni, sources in eni_to_sources.items():
-                total = sum(s['hits'] for s in sources)
+                total = sum((s.get('times') if 'times' in s else s.get('hits', 0)) for s in sources)
                 merged = {}
                 for s in sources:
-                    merged[s['ip']] = merged.get(s['ip'], 0) + s['hits']
-                top = [{'ip': ip, 'hits': hits} for ip, hits in merged.items()]
-                top.sort(key=lambda x: x['hits'], reverse=True)
+                    val = s.get('times') if 'times' in s else s.get('hits', 0)
+                    merged[s['ip']] = merged.get(s['ip'], 0) + val
+                top = [{'ip': ip, 'times': hits} for ip, hits in merged.items()]
+                top.sort(key=lambda x: x['times'], reverse=True)
                 items.append({'instanceId': f'eni:{eni}', 'totalConnections': total, 'uniqueSourceIps': len(merged), 'topSources': top[:limit]})
             items.sort(key=lambda x: x['totalConnections'], reverse=True)
             return jsonify({'items': items, 'windowHours': hours, 'logGroup': log_group, 'note': f'Partial results (no DescribeNetworkInterfaces): {str(e)}'}), 200
@@ -1571,14 +1576,15 @@ def ec2_ssh_activity():
         for eni, sources in eni_to_sources.items():
             inst_id = eni_to_instance.get(eni) or f"eni:{eni}"
             acc = per_instance.setdefault(inst_id, {'totalConnections': 0, 'uniqueSourceIps': 0, 'topSources': []})
-            acc['totalConnections'] += sum(s['hits'] for s in sources)
+            acc['totalConnections'] += sum((s.get('times') if 'times' in s else s.get('hits', 0)) for s in sources)
             # Merge sources by IP
-            ip_to_hits = {s['ip']: s['hits'] for s in acc['topSources']}
+            ip_to_hits = {s['ip']: (s.get('times') if 'times' in s else s.get('hits', 0)) for s in acc['topSources']}
             for s in sources:
-                ip_to_hits[s['ip']] = ip_to_hits.get(s['ip'], 0) + s['hits']
+                val = s.get('times') if 'times' in s else s.get('hits', 0)
+                ip_to_hits[s['ip']] = ip_to_hits.get(s['ip'], 0) + val
             # Rebuild sorted top list
-            merged = [{'ip': ip, 'hits': hits} for ip, hits in ip_to_hits.items()]
-            merged.sort(key=lambda x: x['hits'], reverse=True)
+            merged = [{'ip': ip, 'times': hits} for ip, hits in ip_to_hits.items()]
+            merged.sort(key=lambda x: x['times'], reverse=True)
             acc['topSources'] = merged[:limit]
             acc['uniqueSourceIps'] = len(ip_to_hits)
 
@@ -1612,10 +1618,10 @@ def ec2_ssh_activity():
                     continue
                 acc = per_instance.setdefault(instance_id, {'totalConnections': 0, 'uniqueSourceIps': 0, 'topSources': []})
                 acc['totalConnections'] += 1
-                ip_to_hits = {s['ip']: s['hits'] for s in acc['topSources']}
+                ip_to_hits = {s['ip']: (s.get('times') if 'times' in s else s.get('hits', 0)) for s in acc['topSources']}
                 ip_to_hits[src_ip] = ip_to_hits.get(src_ip, 0) + 1
-                merged = [{'ip': ip, 'hits': hits} for ip, hits in ip_to_hits.items()]
-                merged.sort(key=lambda x: x['hits'], reverse=True)
+                merged = [{'ip': ip, 'times': hits} for ip, hits in ip_to_hits.items()]
+                merged.sort(key=lambda x: x['times'], reverse=True)
                 acc['topSources'] = merged[:limit]
                 acc['uniqueSourceIps'] = len(ip_to_hits)
         except Exception:

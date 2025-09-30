@@ -954,7 +954,7 @@ useEffect(() => {
                                     {info.topSources.slice(0, 10).map((source, idx) => (
                                       <div key={idx} className="flex justify-between">
                                         <span className="font-mono">{source.ip}</span>
-                                        <span className="text-gray-600">{source.hits} hits</span>
+                                        <span className="text-gray-600">{(source.times ?? source.hits) || 0} times</span>
                                       </div>
                                     ))}
                                     {info.topSources.length > 10 && (
