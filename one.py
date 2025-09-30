@@ -1430,14 +1430,14 @@ def ec2_ssh_activity():
             "| filter action = 'ACCEPT' and protocol = 6 and dstPort = 22\n"+
             "| stats count() as hits by interfaceId, srcAddr\n"+
             "| sort hits desc\n"+
-            "| limit 50000"
+            "| limit 10000"
         )
         query_src = (
             base_fields +
             "| filter action = 'ACCEPT' and protocol = 6 and srcPort = 22\n"+
             "| stats count() as hits by interfaceId, srcAddr\n"+
             "| sort hits desc\n"+
-            "| limit 50000"
+            "| limit 10000"
         )
 
         try:
