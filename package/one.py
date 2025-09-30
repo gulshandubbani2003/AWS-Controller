@@ -1501,8 +1501,7 @@ def ec2_ssh_activity():
                     items.append({'instanceId': inst_id, **data})
                 items.sort(key=lambda x: x['totalConnections'], reverse=True)
                 return jsonify({'items': items, 'windowHours': hours, 'source': 'cloudtrail'}), 200
-            # If no CloudTrail EIC events found, return empty to avoid inflating counts with port scans.
-            return jsonify({'items': [], 'windowHours': hours, 'source': 'cloudtrail', 'note': 'No EC2 Instance Connect SSH events found'}), 200
+            # If no CloudTrail EIC events found, continue to Flow Logs fallback below.
         except Exception:
             # If CloudTrail is not permitted or returns nothing, fall back to Flow Logs below.
             pass
