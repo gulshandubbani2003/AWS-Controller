@@ -10,6 +10,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 
 app = Flask(__name__)
+# Accept both with/without trailing slash for all routes
+try:
+    app.url_map.strict_slashes = False
+except Exception:
+    pass
 
 # Initialize AWS session for Lambda deployment
 baseSession = None
@@ -877,6 +882,52 @@ def get_s3_buckets():
     if not baseSession:
         return jsonify({'error': 'Not connected to AWS'}), 401
     return jsonify(list_s3_buckets())
+
+@app.route('/api/s3/<bucketName>/objects', methods=['GET'])
+def get_s3_bucket_objects(bucketName: str):
+    """List objects in a bucket with optional prefix and pagination.
+
+    Query params:
+      - prefix: key prefix filter
+      - continuationToken: pagination token from previous response
+      - maxKeys: page size (default 100)
+    """
+    ensure_session()
+    if not baseSession:
+        return jsonify({'error': 'Not connected to AWS'}), 401
+    try:
+        s3 = baseSession.client('s3')
+        prefix = request.args.get('prefix') or ''
+        token = request.args.get('continuationToken')
+        max_keys = int(request.args.get('maxKeys', '100'))
+        kwargs = {'Bucket': bucketName, 'MaxKeys': max_keys}
+        if prefix:
+            kwargs['Prefix'] = prefix
+        if token:
+            kwargs['ContinuationToken'] = token
+        resp = s3.list_objects_v2(**kwargs)
+        contents = []
+        for obj in resp.get('Contents', []) or []:
+            contents.append({
+                'key': obj.get('Key'),
+                'size': obj.get('Size', 0),
+                'lastModified': obj.get('LastModified').isoformat() if obj.get('LastModified') else None,
+                'storageClass': obj.get('StorageClass', 'STANDARD')
+            })
+        return jsonify({
+            'bucket': bucketName,
+            'prefix': prefix,
+            'objects': contents,
+            'isTruncated': resp.get('IsTruncated', False),
+            'nextContinuationToken': resp.get('NextContinuationToken')
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Alternate path for safety
+@app.route('/api/s3/objects/<bucketName>', methods=['GET'])
+def get_s3_bucket_objects_alt(bucketName: str):
+    return get_s3_bucket_objects(bucketName)
 
 @app.route('/api/rds', methods=['GET'])
 def get_rds_instances():

@@ -73,6 +73,9 @@ const AWSManagementDashboard = () => {
 	const [lambdaActionState, setLambdaActionState] = useState({}); // { [fn]: { invoke, enable, disable } }
 	const [sqsActionState, setSqsActionState] = useState({}); // { [queue]: { status, enable, disable } }
 
+  const [selectedBucket, setSelectedBucket] = useState(null);
+  const [bucketObjects, setBucketObjects] = useState({ objects: [], isTruncated: false, nextContinuationToken: null, loading: false, prefix: '' });
+
   const fetchAllResources = async () => {
     try {
       setRefreshing(true);
@@ -591,6 +594,28 @@ useEffect(() => {
       default: return 'bg-gray-50 border-gray-200 text-gray-800';
     }
   };
+
+  async function loadBucketObjects(bucket, prefix = '', token) {
+  try {
+    setBucketObjects(prev => ({ ...prev, loading: true }));
+    const params = new URLSearchParams();
+    if (prefix) params.set('prefix', prefix);
+    if (token) params.set('continuationToken', token);
+    const qs = params.toString();
+    const url = qs ? `${API_BASE_URL}/s3/${encodeURIComponent(bucket)}/objects?${qs}` : `${API_BASE_URL}/s3/${encodeURIComponent(bucket)}/objects`;
+    const res = await fetch(url);
+      const data = await res.json();
+      setBucketObjects({
+        objects: data.objects || [],
+        isTruncated: !!data.isTruncated,
+        nextContinuationToken: data.nextContinuationToken || null,
+        loading: false,
+        prefix: prefix || ''
+      });
+    } catch (e) {
+      setBucketObjects(prev => ({ ...prev, loading: false }));
+    }
+  }
 
   if (!isConnected) {
     return (
@@ -1155,10 +1180,9 @@ useEffect(() => {
                   }).map((bucket) => (
                     <tr key={bucket.name} className="hover:bg-gray-50">
                       <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="flex items-center">
-                          <Folder className="h-4 w-4 text-blue-500 mr-2" />
-                          <div className="text-sm font-medium text-gray-900">{bucket.name}</div>
-                        </div>
+                        <button onClick={() => { setSelectedBucket(bucket.name); loadBucketObjects(bucket.name); }} className="text-left text-sm font-medium text-blue-600 hover:text-blue-800 underline">
+                          {bucket.name}
+                        </button>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{bucket.region}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{bucket.objects}</td>
@@ -1170,6 +1194,56 @@ useEffect(() => {
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+        )}
+
+        {selectedBucket && (
+          <div className="fixed inset-0 bg-black bg-opacity-30 flex">
+            <div className="ml-auto w-full max-w-3xl h-full bg-white shadow-xl flex flex-col">
+              <div className="px-6 py-4 border-b flex items-center justify-between">
+                <div>
+                  <div className="text-lg font-semibold">Bucket: {selectedBucket}</div>
+                  <div className="text-sm text-gray-500">Prefix: {bucketObjects.prefix || '/'}</div>
+                </div>
+                <button onClick={() => setSelectedBucket(null)} className="px-3 py-1.5 rounded-full bg-gray-200 hover:bg-gray-300 text-sm font-semibold">Close</button>
+              </div>
+              <div className="p-6 overflow-auto">
+                <div className="mb-4 flex items-center gap-2">
+                  <input type="text" value={bucketObjects.prefix} onChange={(e)=> setBucketObjects(prev=>({ ...prev, prefix: e.target.value }))} placeholder="Filter by prefix (folder/)" className="w-full md:w-80 px-4 py-2 rounded-full border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500" />
+                  <button onClick={()=> loadBucketObjects(selectedBucket, bucketObjects.prefix)} className="px-4 py-2 rounded-full bg-purple-600 hover:bg-purple-700 text-white text-sm font-semibold">Apply</button>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Key</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Size</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Storage class</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last modified</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {bucketObjects.loading ? (
+                        <tr><td className="px-6 py-4 text-sm text-gray-500" colSpan={4}>Loading…</td></tr>
+                      ) : (bucketObjects.objects || []).map(obj => (
+                        <tr key={obj.key} className="hover:bg-gray-50">
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-blue-600 font-mono break-all">{obj.key}</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{(obj.size ?? 0).toLocaleString()} B</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{obj.storageClass || 'STANDARD'}</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{obj.lastModified ? new Date(obj.lastModified).toLocaleString() : '-'}</td>
+                        </tr>
+                      ))}
+                      {(!bucketObjects.loading && (bucketObjects.objects || []).length === 0) && (
+                        <tr><td className="px-6 py-4 text-sm text-gray-500" colSpan={4}>No objects</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="mt-4 flex items-center gap-3">
+                  <button disabled={!bucketObjects.isTruncated || !bucketObjects.nextContinuationToken} onClick={()=> loadBucketObjects(selectedBucket, bucketObjects.prefix, bucketObjects.nextContinuationToken)} className={`px-4 py-2 rounded-full text-sm font-semibold ${bucketObjects.isTruncated && bucketObjects.nextContinuationToken ? 'bg-gray-200 hover:bg-gray-300' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}>Load more</button>
+                </div>
+              </div>
             </div>
           </div>
         )}
