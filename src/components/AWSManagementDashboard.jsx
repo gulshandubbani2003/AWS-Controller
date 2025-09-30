@@ -59,6 +59,7 @@ const AWSManagementDashboard = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [sshActivity, setSshActivity] = useState({}); // { [instanceId]: { totalConnections, uniqueSourceIps, topSources: [] } }
   const [sshLoading, setSshLoading] = useState(false);
+  const [expandedSsh, setExpandedSsh] = useState({}); // { [instanceId]: true/false }
 
 	// Controller state
 	const [controllerApps, setControllerApps] = useState([]);
@@ -932,7 +933,37 @@ useEffect(() => {
                           (() => {
                             const info = sshActivity[instance.instance_id];
                             if (!info) return <span className="text-gray-400">-</span>;
-                            return <span>{info.totalConnections || 0} ({info.uniqueSourceIps || 0} IPs)</span>;
+                            
+                            const isExpanded = expandedSsh[instance.instance_id];
+                            
+                            return (
+                              <div>
+                                <button
+                                  onClick={() => setExpandedSsh(prev => ({
+                                    ...prev,
+                                    [instance.instance_id]: !prev[instance.instance_id]
+                                  }))}
+                                  className="text-blue-600 hover:text-blue-800 cursor-pointer underline"
+                                >
+                                  {info.totalConnections || 0} ({info.uniqueSourceIps || 0} IPs)
+                                </button>
+                                
+                                {isExpanded && info.topSources && info.topSources.length > 0 && (
+                                  <div className="mt-2 p-2 bg-gray-50 rounded border text-xs">
+                                    <div className="font-semibold mb-1">Top Source IPs:</div>
+                                    {info.topSources.slice(0, 10).map((source, idx) => (
+                                      <div key={idx} className="flex justify-between">
+                                        <span className="font-mono">{source.ip}</span>
+                                        <span className="text-gray-600">{source.hits} hits</span>
+                                      </div>
+                                    ))}
+                                    {info.topSources.length > 10 && (
+                                      <div className="text-gray-500 mt-1">... and {info.topSources.length - 10} more</div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
                           })()
                         )}
                       </td>
