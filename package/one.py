@@ -1506,9 +1506,9 @@ def ec2_ssh_activity():
         end_ts = int(time.time())
         start_ts = end_ts - hours * 3600
 
-        # First, try to compute SSH activity strictly from CloudTrail EC2 Instance Connect events.
-        # This represents actual people initiating SSH via EIC. If we find any, we will return
-        # ONLY these results to avoid inflating counts with generic TCP connection attempts.
+        # First, try to collect CloudTrail EC2 Instance Connect events to SUPPLEMENT counts later.
+        # We will NOT return early from these; Flow Logs remain the primary source for coverage.
+        ct_per_instance = {}
         try:
             ct = baseSession.client('cloudtrail')
             ct_events = []
@@ -1520,7 +1520,6 @@ def ec2_ssh_activity():
             ):
                 ct_events.extend(page.get('Events', []) or [])
 
-            ct_per_instance: dict[str, dict] = {}
             for ev in ct_events:
                 # Extract instance id from resources or request parameters
                 instance_id = None
@@ -1545,13 +1544,6 @@ def ec2_ssh_activity():
                 merged.sort(key=lambda x: x['times'], reverse=True)
                 acc['topSources'] = merged[:limit]
                 acc['uniqueSourceIps'] = len(ip_to_times)
-
-            if ct_per_instance:
-                items = []
-                for inst_id, data in ct_per_instance.items():
-                    items.append({'instanceId': inst_id, **data})
-                items.sort(key=lambda x: x['totalConnections'], reverse=True)
-                return jsonify({'items': items, 'windowHours': hours, 'source': 'cloudtrail'}), 200
             # If no CloudTrail EIC events found, continue to Flow Logs fallback below.
         except Exception:
             # If CloudTrail is not permitted or returns nothing, fall back to Flow Logs below.
@@ -1701,7 +1693,7 @@ def ec2_ssh_activity():
             items.sort(key=lambda x: x['totalConnections'], reverse=True)
             return jsonify({'items': items, 'windowHours': hours, 'logGroup': log_group, 'note': f'Partial results (no DescribeNetworkInterfaces): {str(e)}'}), 200
 
-        # Aggregate per instance (will merge VPC Flow Logs + CloudTrail EIC)
+        # Aggregate per instance (will merge VPC Flow Logs; CloudTrail EIC will supplement below)
         per_instance = {}
         for eni, sources in eni_to_sources.items():
             inst_id = eni_to_instance.get(eni) or f"eni:{eni}"
@@ -1718,7 +1710,22 @@ def ec2_ssh_activity():
             acc['topSources'] = merged[:limit]
             acc['uniqueSourceIps'] = len(ip_to_hits)
 
-        # If CloudTrail yielded nothing, we fall back to Flow Logs (already processed above)
+        # Supplement with CloudTrail EIC events to count confirmed human SSH where available
+        try:
+            for inst_id, data in ct_per_instance.items():
+                acc = per_instance.setdefault(inst_id, {'totalConnections': 0, 'uniqueSourceIps': 0, 'topSources': []})
+                acc['totalConnections'] += data.get('totalConnections', 0)
+                # Merge IP counts
+                ip_to_hits = {s['ip']: (s.get('times') if 'times' in s else s.get('hits', 0)) for s in acc['topSources']}
+                for s in data.get('topSources', []) or []:
+                    val = s.get('times') if 'times' in s else s.get('hits', 0)
+                    ip_to_hits[s['ip']] = ip_to_hits.get(s['ip'], 0) + val
+                merged = [{'ip': ip, 'times': hits} for ip, hits in ip_to_hits.items()]
+                merged.sort(key=lambda x: x['times'], reverse=True)
+                acc['topSources'] = merged[:limit]
+                acc['uniqueSourceIps'] = len(ip_to_hits)
+        except Exception:
+            pass
 
         # Format items
         items = []
