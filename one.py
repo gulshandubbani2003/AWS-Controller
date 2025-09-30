@@ -1506,7 +1506,68 @@ def ec2_ssh_activity():
         end_ts = int(time.time())
         start_ts = end_ts - hours * 3600
 
-        # First, try to collect CloudTrail EC2 Instance Connect events to SUPPLEMENT counts later.
+        # First, try to read confirmed SSH logins from OS sshd logs shipped to CloudWatch Logs (/ec2/sshd).
+        # If this log group exists and returns data, we will use it as PRIMARY source for accuracy.
+        try:
+            sshd_group = '/ec2/sshd'
+            # Quick existence check (non-fatal if missing)
+            try:
+                _ = logs.describe_log_groups(logGroupNamePrefix=sshd_group)
+                has_sshd = True
+            except Exception:
+                has_sshd = False
+            if has_sshd:
+                query_sshd = (
+                    "fields @message, @logStream\n"+
+                    "| filter @message like /Accepted .* for / or @message like /session opened for user/\n"+
+                    "| parse @message /from (?<src>\\d+\\.\\d+\\.\\d+\\.\\d+)/\n"+
+                    "| stats count() as times by @logStream, src\n"+
+                    "| sort times desc\n"+
+                    "| limit 10000"
+                )
+                startq = logs.start_query(
+                    logGroupName=sshd_group,
+                    startTime=start_ts,
+                    endTime=end_ts,
+                    queryString=query_sshd
+                )
+                qid = startq.get('queryId')
+                sshd_results = []
+                for _ in range(30):
+                    time.sleep(1.0)
+                    r = logs.get_query_results(queryId=qid)
+                    st = r.get('status')
+                    if st in ('Complete', 'Failed', 'Cancelled', 'Timeout'):
+                        if st == 'Complete':
+                            sshd_results = r.get('results', [])
+                        break
+                if sshd_results:
+                    # Build per-instance map from sshd events
+                    def as_dict(row):
+                        return {kv['field']: kv['value'] for kv in row}
+                    per_inst: dict[str, dict] = {}
+                    for row in sshd_results:
+                        d = as_dict(row)
+                        inst_id = d.get('@logStream') or ''
+                        src_ip = d.get('src') or 'unknown'
+                        times = int(d.get('times') or '0')
+                        if not inst_id or times <= 0:
+                            continue
+                        acc = per_inst.setdefault(inst_id, {'totalConnections': 0, 'uniqueSourceIps': 0, 'topSources': []})
+                        acc['totalConnections'] += times
+                        ip_to = {s['ip']: s.get('times', 0) for s in acc['topSources']}
+                        ip_to[src_ip] = ip_to.get(src_ip, 0) + times
+                        merged = [{'ip': ip, 'times': t} for ip, t in ip_to.items()]
+                        merged.sort(key=lambda x: x['times'], reverse=True)
+                        acc['topSources'] = merged[:limit]
+                        acc['uniqueSourceIps'] = len(ip_to)
+                    items = [{'instanceId': iid, **data} for iid, data in per_inst.items()]
+                    items.sort(key=lambda x: x['totalConnections'], reverse=True)
+                    return jsonify({'items': items, 'windowHours': hours, 'source': 'sshd'}), 200
+        except Exception:
+            pass
+
+        # Next, collect CloudTrail EC2 Instance Connect events to SUPPLEMENT counts later.
         # We will NOT return early from these; Flow Logs remain the primary source for coverage.
         ct_per_instance = {}
         try:
